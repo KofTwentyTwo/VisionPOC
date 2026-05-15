@@ -7,6 +7,7 @@ final class MainWindowController: NSWindowController {
     private let detector: ObjectDetector
     private let edgePass: EdgePass
     private let jarvisPass: JarvisStylePass
+    private let asciiPass: AsciiPass
     private let renderer: Renderer
 
     init() {
@@ -45,6 +46,9 @@ final class MainWindowController: NSWindowController {
         let detector = ObjectDetector()
         let edgePass = EdgePass(device: device)
         let jarvisPass = JarvisStylePass()
+        guard let asciiPass = AsciiPass(device: device) else {
+            fatalError("Failed to build the ASCII atlas.")
+        }
 
         guard let renderer = Renderer(
             view: view,
@@ -52,7 +56,8 @@ final class MainWindowController: NSWindowController {
             capture: capture,
             detector: detector,
             edgePass: edgePass,
-            jarvisPass: jarvisPass
+            jarvisPass: jarvisPass,
+            asciiPass: asciiPass
         ) else {
             fatalError("Failed to initialize Renderer.")
         }
@@ -61,6 +66,7 @@ final class MainWindowController: NSWindowController {
         self.detector = detector
         self.edgePass = edgePass
         self.jarvisPass = jarvisPass
+        self.asciiPass = asciiPass
         self.renderer = renderer
 
         view.delegate = renderer

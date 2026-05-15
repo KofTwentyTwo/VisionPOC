@@ -38,7 +38,7 @@ enum Theme {
             CGRect(x: 0.02, y: 0.04, width: 0.47, height: 0.46), // bottom-left EDGES
             CGRect(x: 0.51, y: 0.04, width: 0.47, height: 0.46)  // bottom-right DETECT
         ]
-        static let paneLabels: [String] = ["LIVE", "JARVIS", "EDGES", "DETECT"]
+        static let paneLabels: [String] = ["LIVE", "JARVIS", "EDGES", "ASCII"]
         /// Window default size on first launch.
         static let defaultWindowSize = CGSize(width: 1440, height: 900)
         /// Window minimum size.
@@ -94,6 +94,14 @@ enum Theme {
 
         /// Minimum normalized area for a box to be drawn (filters out tiny noise regions).
         static let minBoxArea: CGFloat = 0.001
+
+        /// Sobel magnitude threshold for the edges pane. Higher values produce
+        /// fewer, more confident edge pixels. Values are unit-normalized [0..1].
+        static let edgeThreshold: Float = 0.18
+
+        /// ASCII art pane: number of character cells across the pane horizontally.
+        /// The vertical cell count is derived to match the source aspect ratio.
+        static let asciiColumns: Int = 120
     }
 
     // MARK: - Tick

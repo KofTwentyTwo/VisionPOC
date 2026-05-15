@@ -32,8 +32,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let detector: ObjectDetector
     private let edgePass: EdgePass
     private let jarvisPass: JarvisStylePass
+    private let asciiPass: AsciiPass
 
     private let textRasterizer: TextRasterizer
+    private var labelTextureCache: [String: MTLTexture] = [:]
     private let nearestSampler: MTLSamplerState
     private let linearSampler: MTLSamplerState
 
@@ -54,7 +56,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         capture: CameraCapture,
         detector: ObjectDetector,
         edgePass: EdgePass,
-        jarvisPass: JarvisStylePass
+        jarvisPass: JarvisStylePass,
+        asciiPass: AsciiPass
     ) {
         guard let queue = device.makeCommandQueue(),
               let library = device.makeDefaultLibrary() else {
@@ -73,6 +76,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         self.detector = detector
         self.edgePass = edgePass
         self.jarvisPass = jarvisPass
+        self.asciiPass = asciiPass
         self.textRasterizer = TextRasterizer(device: device)
         self.lastFrameTime = CFAbsoluteTimeGetCurrent()
 
@@ -159,11 +163,12 @@ final class Renderer: NSObject, MTKViewDelegate {
                 drawImage(encoder: encoder, pipeline: pipelines.live, texture: source, sampler: linearSampler)
             case 1:
                 drawJarvis(encoder: encoder, texture: source, time: elapsed, paneSize: paneRect.size)
+                drawDetections(encoder: encoder, detections: detections)
+                drawDetectionLabels(encoder: encoder, detections: detections, paneRect: paneRect)
             case 2:
                 drawImage(encoder: encoder, pipeline: pipelines.edges, texture: edgesTexture, sampler: nearestSampler)
             case 3:
-                drawImage(encoder: encoder, pipeline: pipelines.live, texture: source, sampler: linearSampler)
-                drawDetections(encoder: encoder, detections: detections)
+                drawAscii(encoder: encoder, texture: source, paneSize: paneRect.size)
             default:
                 break
             }
@@ -373,14 +378,69 @@ final class Renderer: NSObject, MTKViewDelegate {
         let widthPx = CGFloat(texture.width)
         let heightPx = Theme.HUD.footerHeight * backingScale
         let inset = (Theme.HUD.paneFrameInset + 4) * backingScale
+        // Anchor the footer to the BOTTOM of the drawable. MTLViewport y is
+        // measured from the top of the drawable, so larger y means lower on
+        // screen — subtract the footer height + a small margin from the full
+        // drawable height to sit just above the bottom edge.
         let rect = CGRect(
             x: inset,
-            y: 2 * backingScale,
+            y: drawableSize.height - heightPx - 2 * backingScale,
             width: widthPx,
             height: heightPx
         )
         setViewport(encoder: encoder, rect: rect)
         drawTextQuad(encoder: encoder, texture: texture, tint: Theme.Palette.micro)
+    }
+
+    // MARK: - Detection labels & ASCII art
+
+    private func labelTexture(for text: String) -> MTLTexture? {
+        if let cached = labelTextureCache[text] { return cached }
+        let tex = makeLabelTexture(text, font: Theme.Font.body(Theme.Font.boxLabelSize))
+        if let tex { labelTextureCache[text] = tex }
+        return tex
+    }
+
+    private func drawDetectionLabels(
+        encoder: MTLRenderCommandEncoder,
+        detections: [Detection],
+        paneRect: CGRect
+    ) {
+        let labelHeight: CGFloat = 18 * backingScale
+        let inset: CGFloat = 4 * backingScale
+        for det in detections {
+            guard let texture = labelTexture(for: det.label) else { continue }
+            let r = det.rect
+            let boxLeftPx = paneRect.origin.x + CGFloat(r.origin.x) * paneRect.width
+            // Box top edge in screen pixels (y-down). Vision y is origin
+            // bottom-left, so the top edge of the box in image-y-down is
+            // `1 - (y + h)`.
+            let boxTopPx = paneRect.origin.y
+                + (1.0 - (CGFloat(r.origin.y) + CGFloat(r.height))) * paneRect.height
+            let labelWidth = CGFloat(texture.width)
+            let rect = CGRect(
+                x: boxLeftPx + inset,
+                y: boxTopPx + inset,
+                width: labelWidth,
+                height: labelHeight
+            )
+            setViewport(encoder: encoder, rect: rect)
+            drawTextQuad(encoder: encoder, texture: texture, tint: Theme.Palette.boxStroke)
+        }
+    }
+
+    private func drawAscii(
+        encoder: MTLRenderCommandEncoder,
+        texture: MTLTexture,
+        paneSize: CGSize
+    ) {
+        encoder.setRenderPipelineState(pipelines.ascii)
+        encoder.setFragmentTexture(texture, index: 0)
+        encoder.setFragmentTexture(asciiPass.atlasTexture, index: 1)
+        encoder.setFragmentSamplerState(linearSampler, index: 0)
+        var uniforms = asciiPass.uniforms(paneSize: paneSize)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<AsciiUniforms>.stride, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
     }
 
     private func drawTextQuad(

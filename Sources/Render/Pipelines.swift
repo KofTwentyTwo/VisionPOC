@@ -7,6 +7,7 @@ final class Pipelines {
     let edges: MTLRenderPipelineState
     let boxes: MTLRenderPipelineState
     let hudText: MTLRenderPipelineState
+    let ascii: MTLRenderPipelineState
 
     init(device: MTLDevice, library: MTLLibrary) throws {
         self.device = device
@@ -39,6 +40,12 @@ final class Pipelines {
             device: device, library: library,
             vertex: "quad_vertex", fragment: "text_fragment",
             label: "HUDTextPipeline"
+        )
+
+        self.ascii = try Pipelines.makeImagePipeline(
+            device: device, library: library,
+            vertex: "quad_vertex", fragment: "ascii_fragment",
+            label: "AsciiPipeline"
         )
     }
 

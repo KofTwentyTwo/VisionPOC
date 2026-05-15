@@ -70,6 +70,13 @@ fragment float4 text_fragment(QuadVaryings in [[stage_in]],
                               constant float4& tint [[buffer(0)]]) {
     constexpr sampler s(coord::normalized, filter::linear,
                         address::clamp_to_edge);
-    float4 sampled = glyphTex.sample(s, in.uv);
+    // The TextRasterizer renders glyphs via a y-flipped CGContext so the
+    // bitmap's memory row 0 is the BOTTOM of the rendered text (CoreText y-up
+    // convention). quad_vertex emits uv with v=0 at the top of the screen, so
+    // we'd sample top-of-screen at memory-row-0 = bottom-of-text → upside
+    // down. Flip v on the sampling side to put the top of the text at the top
+    // of the quad.
+    float2 uv = float2(in.uv.x, 1.0 - in.uv.y);
+    float4 sampled = glyphTex.sample(s, uv);
     return sampled * tint;
 }

@@ -39,6 +39,8 @@ final class EdgePass {
         encoder.setComputePipelineState(pipeline)
         encoder.setTexture(sobelTex, index: 0)
         encoder.setTexture(thresholdTex, index: 1)
+        var threshold: Float = Theme.Performance.edgeThreshold
+        encoder.setBytes(&threshold, length: MemoryLayout<Float>.size, index: 0)
 
         let w = pipeline.threadExecutionWidth
         let h = max(1, pipeline.maxTotalThreadsPerThreadgroup / w)
