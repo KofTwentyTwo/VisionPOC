@@ -111,6 +111,24 @@ enum Theme {
         /// `Sources/Resources/Models/<name>.mlmodel` so Xcode compiles it into
         /// the app bundle as `<name>.mlmodelc`.
         static let detectorModelName: String = "YOLOv3"
+
+        /// How often YOLO re-detects (Hz). Between detections, `VNTrackObjectRequest`
+        /// updates positions on every submitted frame, so boxes follow objects
+        /// smoothly. Lower the rate to spend less ANE budget on detection.
+        static let yoloDetectionHz: Double = 5.0
+
+        /// Tracks expire if YOLO doesn't re-confirm them within this many seconds.
+        /// Cover brief occlusions but drop ghosts of objects that left the scene.
+        static let trackMaxAgeSeconds: Double = 0.6
+
+        /// Minimum tracker confidence to keep a track alive between YOLO refreshes.
+        /// Vision's tracker reports 0..1; anything below this is treated as lost.
+        static let trackerMinConfidence: Float = 0.3
+
+        /// IoU threshold for matching a new YOLO detection to an existing track.
+        /// Above this, the existing track is refreshed; below, a new track is
+        /// bootstrapped.
+        static let trackMatchIoU: Float = 0.4
     }
 
     // MARK: - Tick
