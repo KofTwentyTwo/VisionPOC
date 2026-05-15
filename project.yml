@@ -2,7 +2,7 @@ name: VisionPOC
 options:
   bundleIdPrefix: com.dmdbrands
   deploymentTarget:
-    macOS: "14.0"
+    macOS: "26.0"
   createIntermediateGroups: true
 settings:
   base:
