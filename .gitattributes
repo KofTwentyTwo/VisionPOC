@@ -1,0 +1,2 @@
+Sources/Resources/Models/*.mlmodel filter=lfs diff=lfs merge=lfs -text
+Sources/Resources/Models/*.mlpackage filter=lfs diff=lfs merge=lfs -text

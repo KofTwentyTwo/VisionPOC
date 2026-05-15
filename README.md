@@ -23,13 +23,18 @@ Sibling to [MetalPOC](https://github.com/KofTwentyTwo/MetalPOC) (Jarvis HUD rend
 
 ## Build & Run
 
+Prerequisite: [Git LFS](https://git-lfs.com) is required because the bundled YOLOv3 model (~248 MB) is tracked via LFS. Install once on your machine: `brew install git-lfs && git lfs install`.
+
 ```bash
 git clone https://github.com/KofTwentyTwo/VisionPOC.git
 cd VisionPOC
+git lfs pull                                  # ensure the YOLOv3 model is materialized
 xcodegen generate
 xcodebuild -project VisionPOC.xcodeproj -scheme VisionPOC -configuration Debug build
 open build/Debug/VisionPOC.app
 ```
+
+If you cloned without LFS installed, run `git lfs install && git lfs pull` and the model will be fetched into `Sources/Resources/Models/`. A fallback script (`scripts/fetch-model.sh`) is also provided for environments where LFS isn't available — it pulls the same model directly from Apple's Core ML catalog.
 
 On first launch, macOS will prompt for camera access. Grant it and the four-pane grid will activate.
 

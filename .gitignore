@@ -7,3 +7,5 @@ xcuserdata/
 
 # Regenerated from project.yml — do not commit
 VisionPOC.xcodeproj/
+
+# Models are stored via Git LFS (see .gitattributes). Nothing to ignore here.

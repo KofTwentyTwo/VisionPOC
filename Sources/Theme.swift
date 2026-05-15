@@ -102,6 +102,15 @@ enum Theme {
         /// ASCII art pane: number of character cells across the pane horizontally.
         /// The vertical cell count is derived to match the source aspect ratio.
         static let asciiColumns: Int = 120
+
+        /// Minimum top-label confidence (0..1) for a YOLO detection to be drawn.
+        /// Lower values surface more objects but include weaker guesses.
+        static let detectionMinConfidence: Float = 0.30
+
+        /// Bundled object detector model. The .mlmodel file must live under
+        /// `Sources/Resources/Models/<name>.mlmodel` so Xcode compiles it into
+        /// the app bundle as `<name>.mlmodelc`.
+        static let detectorModelName: String = "YOLOv3"
     }
 
     // MARK: - Tick

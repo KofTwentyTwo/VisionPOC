@@ -1,5 +1,6 @@
 import Foundation
 import Vision
+import CoreML
 import CoreVideo
 import CoreGraphics
 import os
@@ -18,6 +19,39 @@ final class ObjectDetector: @unchecked Sendable {
     private var _lastInferenceMs: Double = 0
     private var _inFlight = false
     private var _lastFinishedAt: CFAbsoluteTime = 0
+
+    private let yoloRequest: VNCoreMLRequest?
+    private let modelLoadFailure: String?
+
+    init() {
+        let result = ObjectDetector.makeYoloRequest(modelName: Theme.Performance.detectorModelName)
+        self.yoloRequest = result.request
+        self.modelLoadFailure = result.failureReason
+        if let failure = modelLoadFailure {
+            NSLog("ObjectDetector: \(failure) — falling back to Vision built-ins only.")
+        } else {
+            NSLog("ObjectDetector: loaded \(Theme.Performance.detectorModelName) (\(yoloRequest != nil ? "ANE/GPU" : "n/a")).")
+        }
+    }
+
+    private static func makeYoloRequest(modelName: String) -> (request: VNCoreMLRequest?, failureReason: String?) {
+        guard let compiledURL = Bundle.main.url(forResource: modelName, withExtension: "mlmodelc")
+            ?? Bundle.main.url(forResource: modelName, withExtension: "mlpackage")
+        else {
+            return (nil, "Model \(modelName) not found in app bundle")
+        }
+        do {
+            let config = MLModelConfiguration()
+            config.computeUnits = .all
+            let mlModel = try MLModel(contentsOf: compiledURL, configuration: config)
+            let vnModel = try VNCoreMLModel(for: mlModel)
+            let request = VNCoreMLRequest(model: vnModel)
+            request.imageCropAndScaleOption = .scaleFill
+            return (request, nil)
+        } catch {
+            return (nil, "Failed to load \(modelName): \(error)")
+        }
+    }
 
     var lastInferenceMs: Double {
         os_unfair_lock_lock(&lock)
@@ -43,8 +77,6 @@ final class ObjectDetector: @unchecked Sendable {
         _inFlight = true
         os_unfair_lock_unlock(&lock)
 
-        // CVPixelBuffer is not Sendable but we only read from it on the detector queue
-        // and AVFoundation has already handed it off to us — safe to capture.
         nonisolated(unsafe) let buffer = pixelBuffer
         queue.async { [weak self] in
             self?.run(pixelBuffer: buffer)
@@ -54,45 +86,52 @@ final class ObjectDetector: @unchecked Sendable {
     private func run(pixelBuffer: CVPixelBuffer) {
         let start = CFAbsoluteTimeGetCurrent()
 
-        let saliency = VNGenerateObjectnessBasedSaliencyImageRequest()
         let faces = VNDetectFaceRectanglesRequest()
-        let humans = VNDetectHumanRectanglesRequest()
         let animals = VNRecognizeAnimalsRequest()
+        var requests: [VNRequest] = [faces, animals]
+        if let yolo = yoloRequest {
+            requests.append(yolo)
+        }
 
-        // Vision picks the optimal compute unit (ANE on Apple Silicon) by default.
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
         var collected: [Detection] = []
 
         do {
-            try handler.perform([saliency, faces, humans, animals])
+            try handler.perform(requests)
         } catch {
             NSLog("Vision perform error: \(error)")
         }
 
-        if let salient = (saliency.results?.first as? VNSaliencyImageObservation)?.salientObjects {
-            for obj in salient {
-                collected.append(Detection(rect: obj.boundingBox, label: "OBJECT", confidence: obj.confidence))
+        if let yoloResults = yoloRequest?.results as? [VNRecognizedObjectObservation] {
+            let minConfidence = Theme.Performance.detectionMinConfidence
+            for obs in yoloResults {
+                let top = obs.labels.first
+                let topConfidence = top?.confidence ?? obs.confidence
+                if topConfidence < minConfidence { continue }
+                let label = (top?.identifier ?? "OBJECT").uppercased()
+                collected.append(Detection(rect: obs.boundingBox,
+                                           label: label,
+                                           confidence: topConfidence))
             }
         }
-        if let face = faces.results {
-            for obs in face {
-                collected.append(Detection(rect: obs.boundingBox, label: "FACE", confidence: obs.confidence))
-            }
-        }
-        if let human = humans.results {
-            for obs in human {
-                collected.append(Detection(rect: obs.boundingBox, label: "HUMAN", confidence: obs.confidence))
+
+        if let faceResults = faces.results {
+            for obs in faceResults {
+                collected.append(Detection(rect: obs.boundingBox,
+                                           label: "FACE",
+                                           confidence: obs.confidence))
             }
         }
         if let animalResults = animals.results {
             for obs in animalResults {
-                let label = obs.labels.first?.identifier.uppercased() ?? "ANIMAL"
-                collected.append(Detection(rect: obs.boundingBox, label: label, confidence: obs.confidence))
+                let label = (obs.labels.first?.identifier ?? "ANIMAL").uppercased()
+                collected.append(Detection(rect: obs.boundingBox,
+                                           label: label,
+                                           confidence: obs.confidence))
             }
         }
 
         let filtered = filterAndMerge(collected)
-
         let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
 
         os_unfair_lock_lock(&lock)
@@ -105,21 +144,26 @@ final class ObjectDetector: @unchecked Sendable {
 
     private func filterAndMerge(_ all: [Detection]) -> [Detection] {
         let minArea = Theme.Performance.minBoxArea
-        let sizeFiltered = all.filter { $0.rect.width * $0.rect.height >= minArea }
+        let sized = all.filter { $0.rect.width * $0.rect.height >= minArea }
 
-        let labeled = sizeFiltered.filter { $0.label != "OBJECT" }
-        let generic = sizeFiltered.filter { $0.label == "OBJECT" }
-
-        let prunedGeneric = generic.filter { g in
-            !labeled.contains(where: { iou($0.rect, g.rect) > 0.5 })
+        // Suppress strongly-overlapping detections that share the same label.
+        // YOLO already applies NMS internally so cross-class duplicates are rare;
+        // a small same-label pass handles overlap between YOLO + face/animal.
+        let byLabel = Dictionary(grouping: sized, by: { $0.label })
+        var kept: [Detection] = []
+        for (_, group) in byLabel {
+            let sortedGroup = group.sorted { $0.confidence > $1.confidence }
+            var accepted: [Detection] = []
+            for det in sortedGroup {
+                if accepted.allSatisfy({ iou($0.rect, det.rect) < 0.5 }) {
+                    accepted.append(det)
+                }
+            }
+            kept.append(contentsOf: accepted)
         }
 
-        var merged = labeled + prunedGeneric
-        merged.sort { $0.confidence > $1.confidence }
-        if merged.count > Theme.Performance.maxDetectionsPerFrame {
-            merged = Array(merged.prefix(Theme.Performance.maxDetectionsPerFrame))
-        }
-        return merged
+        let sorted = kept.sorted { $0.confidence > $1.confidence }
+        return Array(sorted.prefix(Theme.Performance.maxDetectionsPerFrame))
     }
 
     private func iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
