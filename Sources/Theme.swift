@@ -1,0 +1,127 @@
+import AppKit
+import CoreGraphics
+import simd
+
+/// All tunable parameters for VisionPOC.
+/// Edit a value here, rebuild, see the effect everywhere it's used.
+enum Theme {
+
+    // MARK: - Palette
+
+    enum Palette {
+        /// Primary cyan tint used everywhere (corner brackets, box strokes, scanline highlights).
+        static let cyan = SIMD4<Float>(0.20, 0.95, 1.00, 1.0)
+        /// Dimmer cyan for secondary chrome.
+        static let cyanDim = SIMD4<Float>(0.10, 0.55, 0.62, 1.0)
+        /// Background fill behind panes.
+        static let background = SIMD4<Float>(0.02, 0.03, 0.04, 1.0)
+        /// Pane label text.
+        static let label = SIMD4<Float>(0.85, 0.98, 1.00, 1.0)
+        /// Footer micro-readouts.
+        static let micro = SIMD4<Float>(0.55, 0.85, 0.92, 1.0)
+        /// Edge map foreground (white-on-black look).
+        static let edgeForeground = SIMD4<Float>(0.85, 1.00, 1.00, 1.0)
+        /// Bounding-box stroke.
+        static let boxStroke = SIMD4<Float>(0.20, 0.95, 1.00, 1.0)
+        /// Bounding-box label background.
+        static let boxLabelBg = SIMD4<Float>(0.0, 0.15, 0.18, 0.85)
+    }
+
+    // MARK: - Layout
+
+    enum Layout {
+        /// 2x2 grid pane normalized rects (origin bottom-left, 0..1).
+        /// [topLeft, topRight, bottomLeft, bottomRight]
+        static let panes: [CGRect] = [
+            CGRect(x: 0.02, y: 0.52, width: 0.47, height: 0.46), // top-left LIVE
+            CGRect(x: 0.51, y: 0.52, width: 0.47, height: 0.46), // top-right JARVIS
+            CGRect(x: 0.02, y: 0.04, width: 0.47, height: 0.46), // bottom-left EDGES
+            CGRect(x: 0.51, y: 0.04, width: 0.47, height: 0.46)  // bottom-right DETECT
+        ]
+        static let paneLabels: [String] = ["LIVE", "JARVIS", "EDGES", "DETECT"]
+        /// Window default size on first launch.
+        static let defaultWindowSize = CGSize(width: 1440, height: 900)
+        /// Window minimum size.
+        static let minWindowSize = CGSize(width: 800, height: 500)
+    }
+
+    // MARK: - Font
+
+    enum Font {
+        static let bodyName = "ShareTechMono-Regular"
+        static let titleName = "Orbitron-Bold"
+        static let bodyFallback = "Menlo"
+        static let titleFallback = "Helvetica Neue"
+
+        static let paneLabelSize: CGFloat = 18
+        static let footerSize: CGFloat = 12
+        static let boxLabelSize: CGFloat = 11
+
+        static func body(_ size: CGFloat) -> NSFont {
+            NSFont(name: bodyName, size: size) ?? NSFont(name: bodyFallback, size: size) ?? NSFont.systemFont(ofSize: size)
+        }
+
+        static func title(_ size: CGFloat) -> NSFont {
+            NSFont(name: titleName, size: size) ?? NSFont(name: titleFallback, size: size) ?? NSFont.boldSystemFont(ofSize: size)
+        }
+    }
+
+    // MARK: - Capture & Detection
+
+    enum Performance {
+        enum Profile {
+            case balanced  // 720p, 15 Hz detector
+            case quality   // 1080p, 20 Hz detector
+        }
+        static let profile: Profile = .quality
+
+        static var capturePreset: AVCapturePresetName {
+            switch profile {
+            case .balanced: return .preset1280x720
+            case .quality:  return .preset1920x1080
+            }
+        }
+
+        static var detectorTargetHz: Double {
+            switch profile {
+            case .balanced: return 15
+            case .quality:  return 20
+            }
+        }
+
+        /// Maximum number of boxes to keep from detector output (saliency can return many regions).
+        static let maxDetectionsPerFrame = 20
+
+        /// Minimum normalized area for a box to be drawn (filters out tiny noise regions).
+        static let minBoxArea: CGFloat = 0.001
+    }
+
+    // MARK: - Tick
+
+    enum Tick {
+        /// Target render FPS (display vsync usually caps this).
+        static let renderFPS: Double = 60
+        /// Scanning beam vertical sweep period in seconds.
+        static let scanningBeamPeriod: Double = 3.0
+        /// Scanline density (lines per normalized vertical unit, JARVIS pane).
+        static let scanlineDensity: Float = 220.0
+        /// Hex grid scale (JARVIS pane).
+        static let hexGridScale: Float = 28.0
+    }
+
+    // MARK: - HUD chrome
+
+    enum HUD {
+        static let cornerBracketLength: CGFloat = 16
+        static let cornerBracketThickness: CGFloat = 2
+        static let paneFrameInset: CGFloat = 6
+        static let footerHeight: CGFloat = 22
+    }
+}
+
+/// Type-safe wrapper around AVCaptureSession.Preset string values to keep Theme.swift framework-light.
+struct AVCapturePresetName: RawRepresentable, Equatable {
+    let rawValue: String
+    static let preset1280x720 = AVCapturePresetName(rawValue: "AVCaptureSessionPreset1280x720")
+    static let preset1920x1080 = AVCapturePresetName(rawValue: "AVCaptureSessionPreset1920x1080")
+}

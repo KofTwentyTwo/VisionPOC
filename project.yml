@@ -1,0 +1,47 @@
+name: VisionPOC
+options:
+  bundleIdPrefix: com.dmdbrands
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    ALWAYS_SEARCH_USER_PATHS: NO
+    CONFIGURATION_BUILD_DIR: $(SRCROOT)/build/$(CONFIGURATION)
+targets:
+  VisionPOC:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+    resources:
+      - path: Sources/Resources/Fonts
+        buildPhase: resources
+    info:
+      path: Sources/App/Info.plist
+      properties:
+        CFBundleName: $(PRODUCT_NAME)
+        CFBundleDisplayName: VisionPOC
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        CFBundlePackageType: APPL
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        NSHighResolutionCapable: true
+        NSPrincipalClass: NSApplication
+        ATSApplicationFontsPath: ""
+        NSCameraUsageDescription: "VisionPOC processes a live camera feed to demonstrate Metal and Neural Engine vision pipelines."
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.dmdbrands.VisionPOC
+        PRODUCT_NAME: VisionPOC
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGNING_ALLOWED: NO
+        ENABLE_HARDENED_RUNTIME: NO
+        MTL_FAST_MATH: YES

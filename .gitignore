@@ -1,0 +1,9 @@
+.DS_Store
+build/
+DerivedData/
+.swiftpm/
+*.xcuserstate
+xcuserdata/
+
+# Regenerated from project.yml — do not commit
+VisionPOC.xcodeproj/
