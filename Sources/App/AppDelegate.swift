@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     @MainActor private var logController: LogStreamWindowController?
     @MainActor private var historyController: HistoryWindowController?
     @MainActor private var statusController: StatusWindowController?
+    @MainActor private var aboutController: AboutWindowController?
     @MainActor private var cameraDevicesSubmenu: NSMenu?
     @MainActor private var recorder: Recorder?
     @MainActor private var privacyMenuItem: NSMenuItem?
@@ -59,6 +60,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         let appMenuItem = NSMenuItem()
         mainMenu.addItem(appMenuItem)
         let appMenu = NSMenu()
+        appMenu.addItem(menuItem("About \(appName)", action: #selector(openAbout(_:)), key: "", mods: []))
+        appMenu.addItem(.separator())
         appMenu.addItem(menuItem("Settings…", action: #selector(openSettings(_:)), key: ",", mods: [.command]))
         appMenu.addItem(.separator())
         appMenu.addItem(menuItem("Hide \(appName)", action: #selector(NSApplication.hide(_:)), key: "h", mods: [.command], target: NSApp))
@@ -287,6 +290,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
         historyController?.showWindow(nil)
         historyController?.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @MainActor
+    @objc private func openAbout(_ sender: Any?) {
+        if aboutController == nil {
+            aboutController = AboutWindowController()
+        }
+        aboutController?.showWindow(nil)
+        aboutController?.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
