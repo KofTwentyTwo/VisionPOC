@@ -6,6 +6,7 @@ import Vision
 final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     private var windowController: MainWindowController?
     @MainActor private var settingsController: SettingsWindowController?
+    @MainActor private var logController: LogStreamWindowController?
 
     static func main() {
         let app = NSApplication.shared
@@ -16,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        LogStream.shared.log("VisionPOC starting up", level: .info, source: .app)
         AppDelegate.registerBundledFonts()
 
         let controller = MainWindowController()
@@ -24,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
         installMainMenu()
         NSApp.activate(ignoringOtherApps: true)
+        LogStream.shared.log("ready — main window shown", level: .info, source: .app)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -48,6 +51,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         settings.keyEquivalentModifierMask = [.command]
         settings.target = self
         appMenu.addItem(settings)
+
+        let logStream = NSMenuItem(
+            title: "Log Stream…",
+            action: #selector(openLogStream(_:)),
+            keyEquivalent: "l"
+        )
+        logStream.keyEquivalentModifierMask = [.command]
+        logStream.target = self
+        appMenu.addItem(logStream)
+
         appMenu.addItem(.separator())
 
         let quit = NSMenuItem(
@@ -96,6 +109,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         }
         settingsController?.showWindow(nil)
         settingsController?.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @MainActor
+    @objc private func openLogStream(_ sender: Any?) {
+        if logController == nil {
+            logController = LogStreamWindowController()
+        }
+        logController?.showWindow(nil)
+        logController?.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 

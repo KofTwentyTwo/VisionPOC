@@ -93,6 +93,8 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         os_unfair_lock_lock(&lock)
         _permissionDenied = true
         os_unfair_lock_unlock(&lock)
+        LogStream.shared.log("camera permission denied — grant access in System Settings › Privacy & Security › Camera",
+                             level: .error, source: .camera)
     }
 
     private func configureAndStart() {
@@ -116,9 +118,12 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
             guard let camera else {
                 self.session.commitConfiguration()
-                NSLog("No video capture device available.")
+                LogStream.shared.log("no video capture device available", level: .error, source: .camera)
                 return
             }
+
+            LogStream.shared.log("using camera \"\(camera.localizedName)\" (position \(camera.position.rawValue))",
+                                 level: .info, source: .camera)
 
             do {
                 let input = try AVCaptureDeviceInput(device: camera)
@@ -127,7 +132,7 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                 }
             } catch {
                 self.session.commitConfiguration()
-                NSLog("Failed to create AVCaptureDeviceInput: \(error)")
+                LogStream.shared.log("failed to create AVCaptureDeviceInput: \(error)", level: .error, source: .camera)
                 return
             }
 
@@ -144,6 +149,8 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
             self.session.commitConfiguration()
             self.session.startRunning()
+            LogStream.shared.log("session running, preset \(Theme.Performance.capturePreset.rawValue)",
+                                 level: .info, source: .camera)
         }
     }
 

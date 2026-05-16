@@ -51,15 +51,21 @@ final class FaceRegistry: @unchecked Sendable {
         var existing = templates[name] ?? []
         existing.append(contentsOf: prints)
         templates[name] = existing
+        let total = existing.count
         os_unfair_lock_unlock(&lock)
         saveToDisk()
+        LogStream.shared.log("enrolled \(name) (+\(prints.count) prints, \(total) total)",
+                             level: .info, source: .face)
     }
 
     func forget(name: String) {
         os_unfair_lock_lock(&lock)
-        templates.removeValue(forKey: name)
+        let existed = templates.removeValue(forKey: name) != nil
         os_unfair_lock_unlock(&lock)
         saveToDisk()
+        if existed {
+            LogStream.shared.log("forgot \(name)", level: .info, source: .face)
+        }
     }
 
     /// Returns the closest match below `matchThreshold`, or nil if no enrolled
@@ -115,7 +121,10 @@ final class FaceRegistry: @unchecked Sendable {
             }
         }
         templates = loaded
-        NSLog("FaceRegistry: loaded \(loaded.count) enrolled face\(loaded.count == 1 ? "" : "s") (\(loaded.values.reduce(0) { $0 + $1.count }) prints).")
+        let nameCount = loaded.count
+        let printCount = loaded.values.reduce(0) { $0 + $1.count }
+        LogStream.shared.log("loaded \(nameCount) enrolled face\(nameCount == 1 ? "" : "s") (\(printCount) prints)",
+                             level: .info, source: .face)
     }
 
     private func saveToDisk() {

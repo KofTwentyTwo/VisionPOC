@@ -49,6 +49,7 @@ final class ObjectDetector: @unchecked Sendable {
     /// Mutated exclusively from `queue`. No lock needed inside the serial queue.
     private var tracks: [TrackedObject] = []
     private var lastYoloAt: CFAbsoluteTime = 0
+    private var lastStatsLogAt: CFAbsoluteTime = 0
 
     private let yoloRequest: VNCoreMLRequest?
     private let modelLoadFailure: String?
@@ -58,9 +59,9 @@ final class ObjectDetector: @unchecked Sendable {
         self.yoloRequest = result.request
         self.modelLoadFailure = result.failureReason
         if let failure = modelLoadFailure {
-            NSLog("ObjectDetector: \(failure) — falling back to Vision built-ins only.")
+            LogStream.shared.log(failure + " — falling back to Vision built-ins only.", level: .warn, source: .detect)
         } else {
-            NSLog("ObjectDetector: loaded \(Theme.Performance.detectorModelName), tracker enabled.")
+            LogStream.shared.log("loaded \(Theme.Performance.detectorModelName), tracker enabled (~5 Hz YOLO + ~60 Hz tracker)", level: .info, source: .detect)
         }
     }
 
@@ -126,7 +127,23 @@ final class ObjectDetector: @unchecked Sendable {
 
         // Drop tracks that have aged out (no YOLO refresh recently).
         let maxAge = Theme.Performance.trackMaxAgeSeconds
+        let expired = tracks.filter { (start - $0.lastRefreshedAt) > maxAge }
+        for track in expired {
+            LogStream.shared.log("lost \(track.label.lowercased()) (id \(track.id.uuidString.prefix(4)))",
+                                 level: .info, source: .track)
+        }
         tracks.removeAll { (start - $0.lastRefreshedAt) > maxAge }
+
+        // Periodic stats — once a second.
+        if (start - lastStatsLogAt) >= 1.0 {
+            lastStatsLogAt = start
+            let yoloMs = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
+            let labels = tracks.map { $0.label.lowercased() }.sorted()
+            let summary = labels.isEmpty ? "no objects" : labels.joined(separator: ", ")
+            let kind = shouldDetect ? "yolo" : "track"
+            LogStream.shared.log("\(kind) \(String(format: "%.1fms", yoloMs)) — \(tracks.count) track\(tracks.count == 1 ? "" : "s"): \(summary)",
+                                 level: .debug, source: .detect)
+        }
 
         let elapsedMs = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
         let snapshot = tracks.map {
@@ -195,6 +212,8 @@ final class ObjectDetector: @unchecked Sendable {
                 if i < facePrints.count,
                    let match = faceRegistry.bestMatch(for: facePrints[i]) {
                     label = match.name.uppercased()
+                    LogStream.shared.log("matched \(match.name) (dist \(String(format: "%.1f", match.distance)))",
+                                         level: .debug, source: .face)
                 }
                 newDetections.append((obs.boundingBox, label, obs.confidence))
             }
@@ -225,6 +244,8 @@ final class ObjectDetector: @unchecked Sendable {
                 let track = TrackedObject(label: det.label, confidence: det.confidence, observation: obs, now: now)
                 tracks.append(track)
                 matchedTrackIDs.insert(track.id)
+                LogStream.shared.log("new \(det.label.lowercased()) (id \(track.id.uuidString.prefix(4)), conf \(String(format: "%.2f", det.confidence)))",
+                                     level: .info, source: .track)
             }
         }
     }
