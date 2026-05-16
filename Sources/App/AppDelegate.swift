@@ -66,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         appMenu.addItem(hideOthers)
         appMenu.addItem(menuItem("Show All", action: #selector(NSApplication.unhideAllApplications(_:)), key: "", mods: [], target: NSApp))
         appMenu.addItem(.separator())
-        appMenu.addItem(menuItem("Quit \(appName)", action: #selector(NSApplication.terminate(_:)), key: "q", mods: [.command]))
+        appMenu.addItem(menuItem("Quit \(appName)", action: #selector(NSApplication.terminate(_:)), key: "q", mods: [.command], target: NSApp))
         appMenuItem.submenu = appMenu
 
         // -----------------------------------------------------------------
