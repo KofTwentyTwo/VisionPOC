@@ -67,6 +67,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var statusText: String = ""
     private var backingScale: CGFloat = 2.0
 
+    /// Called from `draw(in:)` AFTER the regular render pass commits, BEFORE
+    /// `commandBuffer.present(drawable)`. The handler receives the drawable's
+    /// texture so a recorder can read pixels from it. The handler runs on the
+    /// MainActor (the MTKView delegate thread). Set to nil to disable.
+    var frameTap: (@MainActor (MTLTexture, CFTimeInterval) -> Void)?
+
     init?(
         view: MTKView,
         device: MTLDevice,
@@ -238,6 +244,13 @@ final class Renderer: NSObject, MTKViewDelegate {
                 completion(nil)
             }
         } else {
+            // Frame tap: invoked after the regular render pass is encoded but
+            // before the drawable is presented. The recorder reads pixels via
+            // its own command buffer + synchronous blit, so the drawable's
+            // texture must still be valid at the time of the call.
+            if let tap = frameTap {
+                tap(drawable.texture, CACurrentMediaTime())
+            }
             commandBuffer.present(drawable)
             commandBuffer.commit()
         }

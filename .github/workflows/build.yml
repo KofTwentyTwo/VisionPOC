@@ -1,0 +1,34 @@
+name: Build
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout (skip LFS — model not needed for build)
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Build
+        run: |
+          xcodebuild \
+            -project VisionPOC.xcodeproj \
+            -scheme VisionPOC \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            build
+      - name: Run unit tests
+        run: |
+          xcodebuild \
+            -project VisionPOC.xcodeproj \
+            -scheme VisionPOC \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            test

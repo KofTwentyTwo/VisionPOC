@@ -1,6 +1,21 @@
 import SwiftUI
 import Observation
 
+/// Snapshot of per-stage detector timings, surfaced to the Diagnostics
+/// section in Settings. The App layer doesn't know about `DetectorStageTiming`
+/// in the Process module; instead, the AppDelegate hands SettingsView a
+/// closure that maps the live struct (if it exists yet) into this shape.
+struct DiagnosticsTimingSnapshot: Sendable, Equatable {
+    var visionBundleMs: Double
+    var featurePrintMs: Double
+    var trackerMs: Double
+    var totalMs: Double
+
+    static let zero = DiagnosticsTimingSnapshot(
+        visionBundleMs: 0, featurePrintMs: 0, trackerMs: 0, totalMs: 0
+    )
+}
+
 /// Mirrors `Theme.Performance`'s live-tunable values into an @Observable so
 /// SwiftUI can bind sliders to them. Every property's `didSet` writes back
 /// through to the static var so the detector/renderer (which read from
@@ -35,6 +50,9 @@ final class TunableSettings {
     var faceMatchThreshold: Float {
         didSet { Theme.Performance.faceMatchThreshold = faceMatchThreshold }
     }
+    var greeterMuted: Bool {
+        didSet { Theme.Performance.greeterMuted = greeterMuted }
+    }
 
     private init() {
         self.yoloHz = Theme.Performance.yoloDetectionHz
@@ -45,6 +63,7 @@ final class TunableSettings {
         self.edgeThreshold = Theme.Performance.edgeThreshold
         self.asciiColumns = Theme.Performance.asciiColumns
         self.faceMatchThreshold = Theme.Performance.faceMatchThreshold
+        self.greeterMuted = Theme.Performance.greeterMuted
     }
 
     func resetDefaults() {
@@ -56,11 +75,22 @@ final class TunableSettings {
         edgeThreshold = 0.18
         asciiColumns = 120
         faceMatchThreshold = 18.0
+        // greeterMuted intentionally not reset — it's a user-visible state
+        // tied to Privacy Mode; resetting tunables shouldn't unsilence TTS.
     }
 }
 
 struct SettingsView: View {
     @Bindable var settings = TunableSettings.shared
+
+    /// If non-nil, the Diagnostics section polls this closure at 2 Hz and
+    /// shows the per-stage detector timing. Hidden when nil (e.g. when the
+    /// detector isn't available yet, or hasn't exposed timing).
+    var timingProvider: (@MainActor () -> DiagnosticsTimingSnapshot?)?
+
+    @State private var timing: DiagnosticsTimingSnapshot = .zero
+    @State private var hasTiming: Bool = false
+    private let diagnosticsTimer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -100,6 +130,8 @@ struct SettingsView: View {
                         Text("Image FeaturePrint distances on face crops typically range 10–30. Same person usually <18, different people usually >24.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        Toggle("Mute greeter (TTS)", isOn: $settings.greeterMuted)
+                            .toggleStyle(.checkbox)
                     }
 
                     section("Edges") {
@@ -114,8 +146,26 @@ struct SettingsView: View {
                                   value: $settings.asciiColumns,
                                   range: 20...300)
                     }
+
+                    if hasTiming {
+                        section("Diagnostics") {
+                            timingRow("Vision bundle", ms: timing.visionBundleMs)
+                            timingRow("Feature print", ms: timing.featurePrintMs)
+                            timingRow("Tracker",       ms: timing.trackerMs)
+                            Divider().padding(.vertical, 2)
+                            timingRow("Total",         ms: timing.totalMs)
+                        }
+                    }
                 }
                 .padding(20)
+            }
+            .onReceive(diagnosticsTimer) { _ in
+                guard let provider = timingProvider, let snap = provider() else {
+                    if hasTiming { hasTiming = false }
+                    return
+                }
+                timing = snap
+                if !hasTiming { hasTiming = true }
             }
 
             Divider()
@@ -159,6 +209,17 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Slider(value: value, in: range)
+        }
+    }
+
+    @ViewBuilder
+    private func timingRow(_ label: String, ms: Double) -> some View {
+        HStack {
+            Text(label).font(.body)
+            Spacer()
+            Text(String(format: "%.1f ms", ms))
+                .font(.system(.body, design: .monospaced))
+                .foregroundStyle(.secondary)
         }
     }
 

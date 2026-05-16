@@ -24,13 +24,38 @@ final class ObjectDetector: @unchecked Sendable {
         var observation: VNDetectedObjectObservation
         var lastRefreshedAt: CFAbsoluteTime
 
-        init(label: String, confidence: Float, observation: VNDetectedObjectObservation, now: CFAbsoluteTime) {
-            self.id = UUID()
+        init(label: String, confidence: Float, observation: VNDetectedObjectObservation, now: CFAbsoluteTime, preferredID: UUID? = nil) {
+            self.id = preferredID ?? UUID()
             self.label = label
             self.confidence = confidence
             self.observation = observation
             self.lastRefreshedAt = now
         }
+    }
+
+    /// Per-stage timing breakdown for the most recent inference pass. The
+    /// "visionBundle" field is the wallclock of the single multi-request
+    /// `handler.perform([yolo, faces, animals, text, body, hand])` call —
+    /// Apple doesn't expose per-request timing inside a bundled perform, so
+    /// we report it as one number. `featurePrint` and `tracker` are separate
+    /// `perform` calls so they get their own breakdown.
+    struct DetectorStageTiming: Sendable {
+        var yoloMs: Double = 0
+        var faceMs: Double = 0
+        var animalMs: Double = 0
+        var textMs: Double = 0
+        var bodyPoseMs: Double = 0
+        var handPoseMs: Double = 0
+        var faceFeaturePrintMs: Double = 0
+        var trackerMs: Double = 0
+        var total: Double = 0
+
+        /// Wallclock of the single bundled Vision perform that runs YOLO,
+        /// faces, animals, text, and both pose requests together. Individual
+        /// per-request breakdowns are approximated by splitting this evenly
+        /// across the requests that ran. `featurePrint` and `tracker` are
+        /// reported separately because they run in their own perform calls.
+        var visionBundleMs: Double = 0
     }
 
     private let queue = DispatchQueue(label: "com.dmdbrands.VisionPOC.detector", qos: .userInitiated)
@@ -48,11 +73,32 @@ final class ObjectDetector: @unchecked Sendable {
     private var _lastDetectMode: DetectMode = .yolo
     private var _lastInferenceMs: Double = 0
     private var _inFlight = false
+    private var _lastStageTiming = DetectorStageTiming()
 
     /// Mutated exclusively from `queue`. No lock needed inside the serial queue.
     private var tracks: [TrackedObject] = []
     private var lastYoloAt: CFAbsoluteTime = 0
     private var lastStatsLogAt: CFAbsoluteTime = 0
+    private var lastStageLogAt: CFAbsoluteTime = 0
+
+    /// Higher-level reasoning subsystems wired off the same detector pass.
+    /// They publish to DetectionEventBus; nothing in the renderer pipeline
+    /// depends on them, so they can be added/removed freely.
+    private let gestureRecognizer = GestureRecognizer()
+    private let activityRecognizer = ActivityRecognizer()
+    private let spatialReasoner = SpatialReasoner()
+    private let eventBus = DetectionEventBus.shared
+
+    /// Per-text last-seen-at, used to suppress flooding the bus with the
+    /// same OCR string every detector tick.
+    private var lastTextEmittedAt: [String: Date] = [:]
+    /// Per-name throttle for face-recognized bus emits (separate from the
+    /// Greeter's TTS throttle).
+    private var lastFaceNameEmittedAt: [String: Date] = [:]
+
+    private static let textEmitThrottle: TimeInterval = 2.0
+    private static let faceNameEmitThrottle: TimeInterval = 5.0
+    private static let textMinConfidence: Float = 0.4
 
     private let yoloRequest: VNCoreMLRequest?
     private let modelLoadFailure: String?
@@ -140,6 +186,15 @@ final class ObjectDetector: @unchecked Sendable {
         return _lastInferenceMs
     }
 
+    /// Most recent per-stage timing breakdown. See `DetectorStageTiming` for
+    /// what each field carries; bundled Vision requests share the
+    /// `visionBundleMs` total.
+    var lastStageTiming: DetectorStageTiming {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        return _lastStageTiming
+    }
+
     func currentDetections() -> [Detection] {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
@@ -189,15 +244,19 @@ final class ObjectDetector: @unchecked Sendable {
         var newTextDetections: [TextDetection] = []
         var newPoses: [PoseDetection] = []
         let detectMode: DetectMode
+        var stageTiming = DetectorStageTiming()
 
         if shouldDetect {
             let extras = detectAndBootstrap(pixelBuffer: pixelBuffer, now: start)
             newTextDetections = extras.text
             newPoses = extras.poses
+            stageTiming = extras.timing
             lastYoloAt = start
             detectMode = .yolo
         } else {
+            let trackerStart = CFAbsoluteTimeGetCurrent()
             trackOnly(pixelBuffer: pixelBuffer, now: start)
+            stageTiming.trackerMs = (CFAbsoluteTimeGetCurrent() - trackerStart) * 1000.0
             detectMode = .track
         }
 
@@ -207,6 +266,8 @@ final class ObjectDetector: @unchecked Sendable {
         for track in expired {
             LogStream.shared.log("lost \(track.label.lowercased()) (id \(track.id.uuidString.prefix(4)))",
                                  level: .info, source: .track)
+            // Publish disappearance for any subscriber that's tracking lifecycles.
+            eventBus.emit(.objectDisappeared(label: track.label, trackId: track.id))
         }
         tracks.removeAll { (start - $0.lastRefreshedAt) > maxAge }
 
@@ -222,12 +283,34 @@ final class ObjectDetector: @unchecked Sendable {
         }
 
         let elapsedMs = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
+        stageTiming.total = elapsedMs
         let snapshot = tracks.map {
             Detection(
                 rect: $0.observation.boundingBox,
                 label: $0.label,
                 confidence: $0.confidence,
                 trackId: $0.id
+            )
+        }
+
+        // Higher-level reasoning subsystems run off the same pass. Gesture &
+        // activity recognizers fire from the just-computed poses; the spatial
+        // reasoner ties them back to current detections.
+        if shouldDetect {
+            let handPoses = newPoses.filter { $0.kind == .hand }
+            let bodyPoses = newPoses.filter { $0.kind == .body }
+            gestureRecognizer.process(handPoses: handPoses)
+            activityRecognizer.process(bodyPoses: bodyPoses)
+            spatialReasoner.process(detections: snapshot, handPoses: handPoses)
+        }
+
+        // Stage-timing log at the same 1Hz cadence as the existing stats line,
+        // but offset by half a second so the two logs don't share a frame.
+        if (start - lastStageLogAt) >= 1.0 {
+            lastStageLogAt = start
+            LogStream.shared.log(
+                "stages: vision-bundle=\(String(format: "%.1f", stageTiming.visionBundleMs))ms fp=\(String(format: "%.1f", stageTiming.faceFeaturePrintMs))ms tracker=\(String(format: "%.1f", stageTiming.trackerMs))ms total=\(String(format: "%.1f", stageTiming.total))ms",
+                level: .debug, source: .detect
             )
         }
 
@@ -242,13 +325,16 @@ final class ObjectDetector: @unchecked Sendable {
         }
         _lastDetectMode = detectMode
         _lastInferenceMs = elapsedMs
+        _lastStageTiming = stageTiming
         _inFlight = false
         os_unfair_lock_unlock(&lock)
     }
 
     // MARK: - YOLO + supplementary detectors
 
-    private func detectAndBootstrap(pixelBuffer: CVPixelBuffer, now: CFAbsoluteTime) -> (text: [TextDetection], poses: [PoseDetection]) {
+    private func detectAndBootstrap(pixelBuffer: CVPixelBuffer, now: CFAbsoluteTime) -> (text: [TextDetection], poses: [PoseDetection], timing: DetectorStageTiming) {
+        var timing = DetectorStageTiming()
+
         let faces = VNDetectFaceRectanglesRequest()
         let animals = VNRecognizeAnimalsRequest()
 
@@ -266,20 +352,34 @@ final class ObjectDetector: @unchecked Sendable {
         }
 
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
+        let bundleStart = CFAbsoluteTimeGetCurrent()
         do {
             try handler.perform(requests)
         } catch {
             NSLog("Vision perform error: \(error)")
         }
+        timing.visionBundleMs = (CFAbsoluteTimeGetCurrent() - bundleStart) * 1000.0
+        // Approximate per-request slices by equally splitting the bundle wall.
+        // Apple doesn't expose per-request timing inside a perform call, so
+        // this is the honest best-effort.
+        let perRequest = timing.visionBundleMs / Double(requests.count)
+        timing.yoloMs = perRequest
+        timing.faceMs = perRequest
+        timing.animalMs = perRequest
+        timing.textMs = perRequest
+        timing.bodyPoseMs = perRequest
+        timing.handPoseMs = perRequest
 
         // Generate feature prints for the face observations we just collected.
         // We re-run a second Vision pass scoped to those face rects so the
         // FeaturePrint network only processes the cropped face regions — ~5ms
         // per face on the ANE, negligible.
+        let fpStart = CFAbsoluteTimeGetCurrent()
         let facePrints: [VNFeaturePrintObservation] = computeFacePrints(
             for: faces.results ?? [],
             pixelBuffer: pixelBuffer
         )
+        timing.faceFeaturePrintMs = (CFAbsoluteTimeGetCurrent() - fpStart) * 1000.0
 
         // If an enrollment capture is pending, feed it the largest face's
         // print from this frame.
@@ -297,19 +397,34 @@ final class ObjectDetector: @unchecked Sendable {
                 newDetections.append((obs.boundingBox, label, confidence))
             }
         }
+        // Track which faces we observed but didn't recognize, so we can fire
+        // a single faceSeenUnknown event per detection cycle.
+        var sawUnmatchedFace = false
         if let faceResults = faces.results {
             for (i, obs) in faceResults.enumerated() {
                 // Try to recognize the face against the registry. The prints
                 // array is index-aligned with faceResults from Vision's order.
                 var label = "FACE"
+                var matched: (name: String, distance: Float)?
                 if i < facePrints.count,
                    let match = faceRegistry.bestMatch(for: facePrints[i]) {
                     label = match.name.uppercased()
+                    matched = match
                     LogStream.shared.log("matched \(match.name) (dist \(String(format: "%.1f", match.distance)))",
                                          level: .debug, source: .face)
                 }
+                if let m = matched {
+                    emitFaceRecognized(name: m.name, distance: m.distance)
+                } else {
+                    sawUnmatchedFace = true
+                }
                 newDetections.append((obs.boundingBox, label, obs.confidence))
             }
+        }
+        if sawUnmatchedFace {
+            // Throttled at the bus emit site implicitly by being "once per
+            // detection cycle" — same semantics as the spec.
+            eventBus.emit(.faceSeenUnknown(trackId: nil))
         }
         if let animalResults = animals.results {
             for obs in animalResults {
@@ -332,13 +447,24 @@ final class ObjectDetector: @unchecked Sendable {
                 track.observation = VNDetectedObjectObservation(boundingBox: det.rect)
                 track.lastRefreshedAt = now
                 matchedTrackIDs.insert(track.id)
+                // Refreshed — lower-priority event, fires often. Subscribers
+                // that care about lifecycle can ignore these.
+                eventBus.emit(.objectRefreshed(label: track.label, trackId: track.id,
+                                               confidence: track.confidence, rect: det.rect))
             } else {
+                // Reuse a recently-seen UUID for this label if TrackStore
+                // remembers one, so the renderer's per-track color is stable
+                // across launches.
+                let preferred = TrackStore.shared.preferredUUID(for: det.label)
                 let obs = VNDetectedObjectObservation(boundingBox: det.rect)
-                let track = TrackedObject(label: det.label, confidence: det.confidence, observation: obs, now: now)
+                let track = TrackedObject(label: det.label, confidence: det.confidence, observation: obs, now: now, preferredID: preferred)
                 tracks.append(track)
                 matchedTrackIDs.insert(track.id)
+                TrackStore.shared.record(label: det.label, id: track.id)
                 LogStream.shared.log("new \(det.label.lowercased()) (id \(track.id.uuidString.prefix(4)), conf \(String(format: "%.2f", det.confidence)))",
                                      level: .info, source: .track)
+                eventBus.emit(.objectAppeared(label: track.label, trackId: track.id,
+                                              confidence: track.confidence, rect: det.rect))
             }
         }
 
@@ -347,6 +473,9 @@ final class ObjectDetector: @unchecked Sendable {
             guard let top = obs.topCandidates(1).first else { return nil }
             return TextDetection(rect: obs.boundingBox, text: top.string, confidence: top.confidence)
         }
+        // Emit text events for every line above the min confidence, throttled
+        // per-string so the same book title doesn't re-fire every 200ms.
+        emitTextRecognized(textDetections)
 
         // ---- Body pose ----
         var bodyPoses: [PoseDetection] = []
@@ -368,7 +497,40 @@ final class ObjectDetector: @unchecked Sendable {
             }
         }
 
-        return (text: textDetections, poses: bodyPoses + handPoses)
+        return (text: textDetections, poses: bodyPoses + handPoses, timing: timing)
+    }
+
+    // MARK: - Event-bus emit helpers (with throttling)
+
+    /// Throttle text events so the same OCR string within 2s doesn't re-emit.
+    /// Called from the detector queue — uses an internal map gated by the
+    /// detector queue's serial execution (no extra lock needed since this is
+    /// only ever invoked from inside `detectAndBootstrap`).
+    private func emitTextRecognized(_ detections: [TextDetection]) {
+        let now = Date()
+        // Cheap GC: drop entries older than 10s every call.
+        lastTextEmittedAt = lastTextEmittedAt.filter { now.timeIntervalSince($0.value) < 10.0 }
+        for det in detections {
+            guard det.confidence >= ObjectDetector.textMinConfidence else { continue }
+            let trimmed = det.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if let prev = lastTextEmittedAt[trimmed], now.timeIntervalSince(prev) < ObjectDetector.textEmitThrottle {
+                continue
+            }
+            lastTextEmittedAt[trimmed] = now
+            eventBus.emit(.textRecognized(text: trimmed, confidence: det.confidence))
+        }
+    }
+
+    /// Throttle face-name events so the same name within 5s doesn't re-emit
+    /// on the bus. The Greeter has its own 30s TTS throttle on top of this.
+    private func emitFaceRecognized(name: String, distance: Float) {
+        let now = Date()
+        if let prev = lastFaceNameEmittedAt[name], now.timeIntervalSince(prev) < ObjectDetector.faceNameEmitThrottle {
+            return
+        }
+        lastFaceNameEmittedAt[name] = now
+        eventBus.emit(.faceRecognized(name: name, distance: distance, trackId: nil))
     }
 
     // MARK: - Pose builders

@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import CoreText
+import Metal
 import Vision
 
 @main
@@ -8,7 +9,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private var windowController: MainWindowController?
     @MainActor private var settingsController: SettingsWindowController?
     @MainActor private var logController: LogStreamWindowController?
+    @MainActor private var historyController: HistoryWindowController?
     @MainActor private var cameraDevicesSubmenu: NSMenu?
+    @MainActor private var recorder: Recorder?
+    @MainActor private var privacyMenuItem: NSMenuItem?
+    @MainActor private var recordMenuItem: NSMenuItem?
 
     static func main() {
         let app = NSApplication.shared
@@ -25,6 +30,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         let controller = MainWindowController()
         windowController = controller
         controller.showWindow(nil)
+
+        // Wake the history store so it starts subscribing to the event bus
+        // immediately, before the History window has ever been opened.
+        _ = HistoryStore.shared
 
         installMainMenu()
         NSApp.activate(ignoringOtherApps: true)
@@ -74,6 +83,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         snapshot.target = self
         appMenu.addItem(snapshot)
 
+        let record = NSMenuItem(
+            title: "Start Recording",
+            action: #selector(toggleRecording(_:)),
+            keyEquivalent: "r"
+        )
+        record.keyEquivalentModifierMask = [.command, .shift]
+        record.target = self
+        appMenu.addItem(record)
+        recordMenuItem = record
+
         appMenu.addItem(.separator())
 
         let quit = NSMenuItem(
@@ -108,6 +127,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         forgetItem.target = self
         facesMenu.addItem(forgetItem)
 
+        facesMenu.addItem(.separator())
+
+        let historyItem = NSMenuItem(
+            title: "Detection History…",
+            action: #selector(openHistory(_:)),
+            keyEquivalent: "h"
+        )
+        historyItem.keyEquivalentModifierMask = [.command]
+        historyItem.target = self
+        facesMenu.addItem(historyItem)
+
         facesItem.submenu = facesMenu
 
         // Camera menu — device picker (dynamic) + manual refresh.
@@ -129,6 +159,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         )
         refreshItem.target = self
         cameraMenu.addItem(refreshItem)
+
+        cameraMenu.addItem(.separator())
+
+        let privacy = NSMenuItem(
+            title: "Privacy Mode: OFF",
+            action: #selector(togglePrivacyMode(_:)),
+            keyEquivalent: "p"
+        )
+        privacy.keyEquivalentModifierMask = [.command, .shift]
+        privacy.target = self
+        cameraMenu.addItem(privacy)
+        privacyMenuItem = privacy
 
         cameraItem.submenu = cameraMenu
 
@@ -202,11 +244,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     @MainActor
     @objc private func openSettings(_ sender: Any?) {
         if settingsController == nil {
-            settingsController = SettingsWindowController()
+            // The detector is owned by the main window controller. We pass a
+            // closure that the Diagnostics section polls at 2 Hz; returning
+            // nil hides the Diagnostics block (e.g. before the window exists
+            // or if the detector hasn't started reporting timings yet).
+            let provider: @MainActor () -> DiagnosticsTimingSnapshot? = { [weak self] in
+                self?.currentDetectorTiming()
+            }
+            settingsController = SettingsWindowController(timingProvider: provider)
         }
         settingsController?.showWindow(nil)
         settingsController?.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Reads `detector.lastStageTiming` reflectively via KVC. The detector is
+    /// owned by Agent A; if they haven't added the property yet, KVC returns
+    /// nil and the Diagnostics block stays hidden. This keeps the App layer
+    /// from build-coupling to a Process-layer symbol that may not exist.
+    @MainActor
+    private func currentDetectorTiming() -> DiagnosticsTimingSnapshot? {
+        guard let detector = windowController?.detector else { return nil }
+        // Use Mirror to look for a `lastStageTiming` member without naming
+        // the type. If it isn't present, return nil; otherwise project its
+        // children into our snapshot struct by label.
+        let mirror = Mirror(reflecting: detector)
+        guard let raw = mirror.descendant("lastStageTiming") else { return nil }
+        let inner = Mirror(reflecting: raw)
+        var snap = DiagnosticsTimingSnapshot.zero
+        for child in inner.children {
+            guard let label = child.label else { continue }
+            let value = (child.value as? Double) ?? Double((child.value as? Float) ?? 0)
+            switch label {
+            case "visionBundleMs": snap.visionBundleMs = value
+            case "featurePrintMs": snap.featurePrintMs = value
+            case "trackerMs":      snap.trackerMs = value
+            case "totalMs":        snap.totalMs = value
+            default: break
+            }
+        }
+        return snap
     }
 
     @MainActor
@@ -217,6 +294,116 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         logController?.showWindow(nil)
         logController?.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @MainActor
+    @objc private func openHistory(_ sender: Any?) {
+        if historyController == nil {
+            historyController = HistoryWindowController()
+        }
+        historyController?.showWindow(nil)
+        historyController?.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // MARK: - Privacy Mode
+
+    @MainActor
+    @objc private func togglePrivacyMode(_ sender: Any?) {
+        let newValue = !Theme.Performance.faceRecognitionDisabled
+        Theme.Performance.faceRecognitionDisabled = newValue
+        Theme.Performance.greeterMuted = newValue
+        TunableSettings.shared.greeterMuted = newValue
+        privacyMenuItem?.title = newValue ? "Privacy Mode: ON" : "Privacy Mode: OFF"
+        LogStream.shared.log(
+            "privacy mode \(newValue ? "enabled" : "disabled")",
+            level: .info,
+            source: .app
+        )
+    }
+
+    // MARK: - Recording
+
+    @MainActor
+    @objc private func toggleRecording(_ sender: Any?) {
+        if let rec = recorder, rec.isRecording {
+            stopRecordingFlow(rec)
+        } else {
+            startRecordingFlow()
+        }
+    }
+
+    @MainActor
+    private func startRecordingFlow() {
+        guard let renderer = windowController?.renderer,
+              let device = MTLCreateSystemDefaultDevice(),
+              let rec = Recorder(device: device) else {
+            showRecordingResult(url: nil, started: false)
+            return
+        }
+        // Use the renderer's drawable size if available, otherwise the main
+        // screen. Recorder needs an integer width/height to allocate the
+        // AVAssetWriterInput at the right resolution.
+        let size = currentRecordingSize()
+        let started = rec.startRecording(width: size.width, height: size.height)
+        guard started else {
+            recorder = nil
+            showRecordingResult(url: nil, started: false)
+            return
+        }
+        recorder = rec
+        renderer.frameTap = { [weak rec] texture, time in
+            rec?.writeFrame(texture: texture, time: time)
+        }
+        recordMenuItem?.title = "Stop Recording"
+        LogStream.shared.log("recording started (\(size.width)x\(size.height))", level: .info, source: .app)
+    }
+
+    @MainActor
+    private func stopRecordingFlow(_ rec: Recorder) {
+        // Drop the frame tap immediately so no more frames queue up while the
+        // writer is finishing. The recorder owns the in-flight pixel buffer
+        // until its completion fires.
+        windowController?.renderer.frameTap = nil
+        rec.stopRecording { [weak self] url in
+            Task { @MainActor in
+                guard let self else { return }
+                self.recorder = nil
+                self.recordMenuItem?.title = "Start Recording"
+                self.showRecordingResult(url: url, started: true)
+            }
+        }
+    }
+
+    @MainActor
+    private func currentRecordingSize() -> (width: Int, height: Int) {
+        if let view = windowController?.window?.contentView as? NSView {
+            let scale = view.window?.backingScaleFactor ?? 2.0
+            let bounds = view.bounds
+            let w = Int((bounds.width * scale).rounded())
+            let h = Int((bounds.height * scale).rounded())
+            if w > 0 && h > 0 { return (w, h) }
+        }
+        let frame = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        return (Int(frame.width), Int(frame.height))
+    }
+
+    @MainActor
+    private func showRecordingResult(url: URL?, started: Bool) {
+        let alert = NSAlert()
+        if let url {
+            alert.messageText = "Recording saved"
+            alert.informativeText = "Saved to \(url.path)"
+        } else if started {
+            alert.messageText = "Recording failed"
+            alert.informativeText = "The recorder did not produce a file."
+            alert.alertStyle = .warning
+        } else {
+            alert.messageText = "Recording failed to start"
+            alert.informativeText = "The recorder could not be initialized."
+            alert.alertStyle = .warning
+        }
+        alert.runModal()
     }
 
     // MARK: - Face enrollment

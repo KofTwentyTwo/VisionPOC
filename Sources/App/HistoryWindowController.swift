@@ -2,18 +2,17 @@ import AppKit
 import SwiftUI
 
 @MainActor
-final class SettingsWindowController: NSWindowController, NSWindowDelegate {
-    private static let frameDefaultsKey = "VPOC.SettingsWindowFrame"
+final class HistoryWindowController: NSWindowController, NSWindowDelegate {
+    private static let frameDefaultsKey = "VPOC.HistoryWindowFrame"
 
-    init(timingProvider: (@MainActor () -> DiagnosticsTimingSnapshot?)? = nil) {
-        var view = SettingsView()
-        view.timingProvider = timingProvider
-        let hosting = NSHostingController(rootView: view)
+    init() {
+        let hosting = NSHostingController(rootView: HistoryView())
         let window = NSWindow(contentViewController: hosting)
-        window.title = "VisionPOC Settings"
-        window.styleMask = [.titled, .closable, .resizable]
+        window.title = "VisionPOC Detection History"
+        window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
         window.appearance = NSAppearance(named: .darkAqua)
         window.isReleasedWhenClosed = false
+        window.level = .floating
         window.center()
         super.init(window: window)
 
@@ -27,7 +26,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     private func restoreFrame() {
         guard let window,
-              let saved = UserDefaults.standard.string(forKey: SettingsWindowController.frameDefaultsKey) else {
+              let saved = UserDefaults.standard.string(forKey: HistoryWindowController.frameDefaultsKey) else {
             return
         }
         let rect = NSRectFromString(saved)
@@ -39,6 +38,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard let window else { return }
         UserDefaults.standard.set(NSStringFromRect(window.frame),
-                                  forKey: SettingsWindowController.frameDefaultsKey)
+                                  forKey: HistoryWindowController.frameDefaultsKey)
     }
 }

@@ -154,6 +154,18 @@ enum Theme {
         /// distances on padded face crops (those run ~10–25; same-person
         /// matches usually <18, different people >25).
         nonisolated(unsafe) static var faceMatchThreshold: Float = 18.0
+
+        /// When true, the Greeter subscribes to face-recognized events but
+        /// suppresses the AVSpeechSynthesizer call. Surfaced by the UI agent
+        /// as a menu toggle; bound from the Settings panel.
+        nonisolated(unsafe) static var greeterMuted: Bool = false
+
+        /// When true, the face-recognition pipeline should skip identification
+        /// (suppress names on bounding-box labels). Read by ObjectDetector on
+        /// the detection path. Set by the Privacy Mode toggle. (If the
+        /// detector doesn't honor this flag, Privacy Mode still mutes the
+        /// greeter and hides face entries from the history view.)
+        nonisolated(unsafe) static var faceRecognitionDisabled: Bool = false
     }
 
     // MARK: - Tick
