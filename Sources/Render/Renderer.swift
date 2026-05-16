@@ -153,29 +153,43 @@ final class Renderer: NSObject, MTKViewDelegate {
 
         let panes = Theme.Layout.panes
         let detections = detector.currentDetections()
+        let sourceAspect: CGFloat = {
+            let w = max(1, capture.width)
+            let h = max(1, capture.height)
+            return CGFloat(w) / CGFloat(h)
+        }()
+
+        // Per-pane aspect-fit inner rect. Letterboxes the video content so the
+        // image keeps its source aspect ratio even when the pane is a
+        // different shape; brackets and detection overlays follow the inner
+        // rect so the HUD frames the video itself, not the bounding cell.
+        var innerRects: [CGRect] = []
+        innerRects.reserveCapacity(panes.count)
 
         for index in 0..<panes.count {
             let paneRect = pixelRect(panes[index], in: drawableSize)
-            setViewport(encoder: encoder, rect: paneRect)
+            let inner = aspectFitRect(into: paneRect, sourceAspect: sourceAspect)
+            innerRects.append(inner)
+            setViewport(encoder: encoder, rect: inner)
 
             switch index {
             case 0:
                 drawImage(encoder: encoder, pipeline: pipelines.live, texture: source, sampler: linearSampler)
             case 1:
-                drawJarvis(encoder: encoder, texture: source, time: elapsed, paneSize: paneRect.size)
+                drawJarvis(encoder: encoder, texture: source, time: elapsed, paneSize: inner.size)
                 drawDetections(encoder: encoder, detections: detections)
-                drawDetectionLabels(encoder: encoder, detections: detections, paneRect: paneRect)
+                drawDetectionLabels(encoder: encoder, detections: detections, paneRect: inner)
             case 2:
                 drawImage(encoder: encoder, pipeline: pipelines.edges, texture: edgesTexture, sampler: nearestSampler)
             case 3:
-                drawAscii(encoder: encoder, texture: source, paneSize: paneRect.size)
+                drawAscii(encoder: encoder, texture: source, paneSize: inner.size)
             default:
                 break
             }
         }
 
-        drawCornerBrackets(encoder: encoder, drawableSize: drawableSize)
-        drawPaneLabels(encoder: encoder, drawableSize: drawableSize)
+        drawCornerBrackets(encoder: encoder, drawableSize: drawableSize, innerRects: innerRects)
+        drawPaneLabels(encoder: encoder, drawableSize: drawableSize, innerRects: innerRects)
         drawFooter(encoder: encoder, drawableSize: drawableSize)
 
         encoder.endEncoding()
@@ -218,6 +232,30 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
 
     // MARK: - Drawing helpers
+
+    /// Returns the largest rect that fits inside `pane` while preserving
+    /// `sourceAspect`. Centers the result horizontally and vertically so the
+    /// letterbox bars are symmetric. Used to keep camera video square with the
+    /// source even when the pane cell isn't.
+    private func aspectFitRect(into pane: CGRect, sourceAspect: CGFloat) -> CGRect {
+        guard pane.width > 0, pane.height > 0, sourceAspect > 0 else { return pane }
+        let paneAspect = pane.width / pane.height
+        if abs(paneAspect - sourceAspect) < 0.001 {
+            return pane
+        }
+        var width = pane.width
+        var height = pane.height
+        if paneAspect > sourceAspect {
+            // Pane is wider than the source — shrink width, keep height.
+            width = pane.height * sourceAspect
+        } else {
+            // Pane is taller than the source — shrink height, keep width.
+            height = pane.width / sourceAspect
+        }
+        let originX = pane.origin.x + (pane.width - width) * 0.5
+        let originY = pane.origin.y + (pane.height - height) * 0.5
+        return CGRect(x: originX, y: originY, width: width, height: height)
+    }
 
     private func pixelRect(_ normalized: CGRect, in size: CGSize) -> CGRect {
         // Theme rects are origin bottom-left. MTLViewport originY is top-left in pixels.
@@ -287,16 +325,17 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private func drawCornerBrackets(encoder: MTLRenderCommandEncoder, drawableSize: CGSize) {
-        let panes = Theme.Layout.panes
+    private func drawCornerBrackets(encoder: MTLRenderCommandEncoder, drawableSize: CGSize, innerRects: [CGRect]) {
         let bracketLen = Theme.HUD.cornerBracketLength * backingScale
         let thickness = Theme.HUD.cornerBracketThickness * backingScale
         let color = Theme.Palette.cyan
 
         encoder.setRenderPipelineState(pipelines.boxes)
 
-        for paneIndex in 0..<panes.count {
-            let rect = pixelRect(panes[paneIndex], in: drawableSize)
+        for paneIndex in 0..<innerRects.count {
+            // Hug the aspect-fitted video rect instead of the outer pane cell
+            // so the brackets visually frame the picture, not the letterbox.
+            let rect = innerRects[paneIndex]
             let inset = Theme.HUD.paneFrameInset * backingScale
             let x0 = rect.origin.x + inset
             let y0 = rect.origin.y + inset
@@ -332,13 +371,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private func drawPaneLabels(encoder: MTLRenderCommandEncoder, drawableSize: CGSize) {
+    private func drawPaneLabels(encoder: MTLRenderCommandEncoder, drawableSize: CGSize, innerRects: [CGRect]) {
         let labels = Theme.Layout.paneLabels
-        let panes = Theme.Layout.panes
         let inset = Theme.HUD.paneFrameInset * backingScale + 8 * backingScale
         let labelHeightPx: CGFloat = 24 * backingScale
 
-        for index in 0..<min(labels.count, panes.count) {
+        for index in 0..<min(labels.count, innerRects.count) {
             if paneLabelTextures[index] == nil {
                 paneLabelTextures[index] = makeLabelTexture(
                     labels[index],
@@ -347,10 +385,12 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
             guard let texture = paneLabelTextures[index] else { continue }
 
-            let paneRect = pixelRect(panes[index], in: drawableSize)
+            // Anchor labels to the inner (aspect-fit) rect so they sit inside
+            // the visible video, not floating on a letterbox bar.
+            let inner = innerRects[index]
             let widthPx = CGFloat(texture.width)
-            let xPx = paneRect.origin.x + inset
-            let yPx = paneRect.origin.y + inset
+            let xPx = inner.origin.x + inset
+            let yPx = inner.origin.y + inset
 
             let rect = CGRect(x: xPx, y: yPx, width: widthPx, height: labelHeightPx)
             setViewport(encoder: encoder, rect: rect)
