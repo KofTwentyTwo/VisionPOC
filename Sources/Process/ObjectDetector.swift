@@ -35,6 +35,11 @@ final class ObjectDetector: @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "com.dmdbrands.VisionPOC.detector", qos: .userInitiated)
     private let trackingHandler = VNSequenceRequestHandler()
+    let faceRegistry = FaceRegistry()
+
+    /// State for the in-flight "capture next N face prints for enrollment" flow.
+    /// Accessed exclusively from `queue`.
+    private var pendingEnrollment: (remaining: Int, collected: [VNFeaturePrintObservation], completion: @Sendable ([VNFeaturePrintObservation]) -> Void)?
 
     private var lock = os_unfair_lock_s()
     private var _currentDetections: [Detection] = []
@@ -157,6 +162,19 @@ final class ObjectDetector: @unchecked Sendable {
             NSLog("Vision perform error: \(error)")
         }
 
+        // Generate feature prints for the face observations we just collected.
+        // We re-run a second Vision pass scoped to those face rects so the
+        // FeaturePrint network only processes the cropped face regions — ~5ms
+        // per face on the ANE, negligible.
+        let facePrints: [VNFeaturePrintObservation] = computeFacePrints(
+            for: faces.results ?? [],
+            pixelBuffer: pixelBuffer
+        )
+
+        // If an enrollment capture is pending, feed it the largest face's
+        // print from this frame.
+        consumeEnrollmentIfNeeded(faces: faces.results ?? [], prints: facePrints)
+
         var newDetections: [(rect: CGRect, label: String, confidence: Float)] = []
 
         let minConfidence = Theme.Performance.detectionMinConfidence
@@ -170,8 +188,15 @@ final class ObjectDetector: @unchecked Sendable {
             }
         }
         if let faceResults = faces.results {
-            for obs in faceResults {
-                newDetections.append((obs.boundingBox, "FACE", obs.confidence))
+            for (i, obs) in faceResults.enumerated() {
+                // Try to recognize the face against the registry. The prints
+                // array is index-aligned with faceResults from Vision's order.
+                var label = "FACE"
+                if i < facePrints.count,
+                   let match = faceRegistry.bestMatch(for: facePrints[i]) {
+                    label = match.name.uppercased()
+                }
+                newDetections.append((obs.boundingBox, label, obs.confidence))
             }
         }
         if let animalResults = animals.results {
@@ -255,6 +280,106 @@ final class ObjectDetector: @unchecked Sendable {
             }
         }
         return bestIdx
+    }
+
+    // MARK: - Face feature prints & enrollment
+
+    /// Generates a per-face feature print by running `VNGenerateImageFeaturePrintRequest`
+    /// on a region-of-interest crop for each face. Vision's public API doesn't
+    /// expose a dedicated face-embedding model, but the general-purpose image
+    /// FeaturePrint applied to a tight face crop produces distances that
+    /// reliably separate "same person" from "different person" for the small
+    /// number of enrolled identities typical of a POC.
+    private func computeFacePrints(
+        for faces: [VNFaceObservation],
+        pixelBuffer: CVPixelBuffer
+    ) -> [VNFeaturePrintObservation] {
+        guard !faces.isEmpty else { return [] }
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
+
+        var requests: [VNGenerateImageFeaturePrintRequest] = []
+        requests.reserveCapacity(faces.count)
+        for face in faces {
+            let req = VNGenerateImageFeaturePrintRequest()
+            // Slightly pad the face rect so we capture some surrounding context
+            // (hairline, jaw). Clamp to [0,1].
+            req.regionOfInterest = padFaceRect(face.boundingBox)
+            requests.append(req)
+        }
+
+        do {
+            try handler.perform(requests)
+        } catch {
+            NSLog("Face FeaturePrint perform error: \(error)")
+            return []
+        }
+
+        var out: [VNFeaturePrintObservation] = []
+        for req in requests {
+            if let obs = req.results?.first as? VNFeaturePrintObservation {
+                out.append(obs)
+            }
+        }
+        return out
+    }
+
+    private func padFaceRect(_ r: CGRect) -> CGRect {
+        let pad: CGFloat = 0.08
+        let x = max(0, r.origin.x - r.width * pad)
+        let y = max(0, r.origin.y - r.height * pad)
+        let w = min(1 - x, r.width * (1 + 2 * pad))
+        let h = min(1 - y, r.height * (1 + 2 * pad))
+        return CGRect(x: x, y: y, width: w, height: h)
+    }
+
+    private func consumeEnrollmentIfNeeded(
+        faces: [VNFaceObservation],
+        prints: [VNFeaturePrintObservation]
+    ) {
+        guard var enrollment = pendingEnrollment else { return }
+        guard !faces.isEmpty, !prints.isEmpty else {
+            // Wait for a frame that actually contains a face.
+            return
+        }
+
+        // Use the largest face by bounding-box area — most likely to be the
+        // person actively enrolling rather than a bystander in the background.
+        let pairs = zip(faces, prints)
+        let chosen = pairs.max(by: { lhs, rhs in
+            let la = lhs.0.boundingBox.width * lhs.0.boundingBox.height
+            let ra = rhs.0.boundingBox.width * rhs.0.boundingBox.height
+            return la < ra
+        })
+        guard let (_, print) = chosen else { return }
+
+        enrollment.collected.append(print)
+        enrollment.remaining -= 1
+
+        if enrollment.remaining <= 0 {
+            let captured = enrollment.collected
+            let completion = enrollment.completion
+            pendingEnrollment = nil
+            completion(captured)
+        } else {
+            pendingEnrollment = enrollment
+        }
+    }
+
+    /// Captures `count` feature prints from upcoming detection frames and
+    /// delivers them to `completion` on an arbitrary queue. The caller is
+    /// responsible for hopping back to main if it touches UI.
+    func captureFeaturePrints(count: Int, completion: @escaping @Sendable ([VNFeaturePrintObservation]) -> Void) {
+        let n = max(1, count)
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.pendingEnrollment = (remaining: n, collected: [], completion: completion)
+        }
+    }
+
+    func cancelEnrollment() {
+        queue.async { [weak self] in
+            self?.pendingEnrollment = nil
+        }
     }
 
     private func iou(_ a: CGRect, _ b: CGRect) -> CGFloat {

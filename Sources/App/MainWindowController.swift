@@ -4,7 +4,7 @@ import MetalKit
 final class MainWindowController: NSWindowController {
     private let mtkView: MTKView
     private let capture: CameraCapture
-    private let detector: ObjectDetector
+    let detector: ObjectDetector
     private let edgePass: EdgePass
     private let jarvisPass: JarvisStylePass
     private let asciiPass: AsciiPass
