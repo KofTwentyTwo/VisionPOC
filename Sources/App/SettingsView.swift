@@ -54,6 +54,18 @@ final class TunableSettings {
         didSet { Theme.Performance.greeterMuted = greeterMuted }
     }
 
+    /// Display paths for the snapshot/recording output directories. Stored
+    /// here as @Observable strings so the labels in the Settings panel
+    /// re-render as soon as the user picks a new folder. The authoritative
+    /// values live in UserDefaults via `OutputLocations`.
+    var snapshotPath: String = OutputLocations.snapshotDisplayPath()
+    var recordingPath: String = OutputLocations.recordingDisplayPath()
+
+    func refreshOutputPaths() {
+        snapshotPath = OutputLocations.snapshotDisplayPath()
+        recordingPath = OutputLocations.recordingDisplayPath()
+    }
+
     private init() {
         self.yoloHz = Theme.Performance.yoloDetectionHz
         self.detectionMinConfidence = Theme.Performance.detectionMinConfidence
@@ -147,6 +159,27 @@ struct SettingsView: View {
                                   range: 20...300)
                     }
 
+                    section("Output Locations") {
+                        outputRow(
+                            label: "Snapshots",
+                            path: settings.snapshotPath,
+                            chooseTitle: "Choose Snapshot Folder",
+                            apply: { url in
+                                OutputLocations.setSnapshotDirectory(url)
+                                settings.refreshOutputPaths()
+                            }
+                        )
+                        outputRow(
+                            label: "Recordings",
+                            path: settings.recordingPath,
+                            chooseTitle: "Choose Recording Folder",
+                            apply: { url in
+                                OutputLocations.setRecordingDirectory(url)
+                                settings.refreshOutputPaths()
+                            }
+                        )
+                    }
+
                     if hasTiming {
                         section("Diagnostics") {
                             timingRow("Vision bundle", ms: timing.visionBundleMs)
@@ -209,6 +242,31 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Slider(value: value, in: range)
+        }
+    }
+
+    @ViewBuilder
+    private func outputRow(
+        label: String,
+        path: String,
+        chooseTitle: String,
+        apply: @escaping (URL) -> Void
+    ) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .frame(width: 84, alignment: .leading)
+            Text(path)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button("Choose…") {
+                OutputLocations.chooseDirectory(title: chooseTitle) { url in
+                    if let url = url { apply(url) }
+                }
+            }
+            .controlSize(.small)
         }
     }
 

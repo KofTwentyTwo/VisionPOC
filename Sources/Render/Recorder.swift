@@ -360,14 +360,11 @@ final class Recorder {
     }
 
     private static func makeOutputURL() -> URL {
-        let desktop = FileManager.default.urls(
-            for: .desktopDirectory,
-            in: .userDomainMask
-        ).first ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop")
-
+        // Recorder is @MainActor so this call is safe.
+        let dir = OutputLocations.recordingDirectory()
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
         let stamp = formatter.string(from: Date())
-        return desktop.appendingPathComponent("VisionPOC-\(stamp).mov")
+        return dir.appendingPathComponent("VisionPOC-\(stamp).mov")
     }
 }

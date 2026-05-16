@@ -111,7 +111,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let df = DateFormatter()
         df.dateFormat = "yyyy-MM-dd-HHmmss"
         let name = "VisionPOC-\(df.string(from: Date())).png"
-        let url = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask)[0].appendingPathComponent(name)
+        let url = OutputLocations.snapshotDirectory().appendingPathComponent(name)
         do {
             try data.write(to: url)
             LogStream.shared.log("saved \(url.lastPathComponent)", level: .info, source: .app)
