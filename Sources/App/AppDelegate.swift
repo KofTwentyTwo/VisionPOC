@@ -5,6 +5,7 @@ import Vision
 @main
 final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     private var windowController: MainWindowController?
+    @MainActor private var settingsController: SettingsWindowController?
 
     static func main() {
         let app = NSApplication.shared
@@ -33,11 +34,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     private func installMainMenu() {
         let mainMenu = NSMenu()
 
-        // Application menu (Quit).
+        // Application menu (Settings, Quit).
         let appMenuItem = NSMenuItem()
         mainMenu.addItem(appMenuItem)
         let appMenu = NSMenu()
         let appName = ProcessInfo.processInfo.processName
+
+        let settings = NSMenuItem(
+            title: "Settings…",
+            action: #selector(openSettings(_:)),
+            keyEquivalent: ","
+        )
+        settings.keyEquivalentModifierMask = [.command]
+        settings.target = self
+        appMenu.addItem(settings)
+        appMenu.addItem(.separator())
+
         let quit = NSMenuItem(
             title: "Quit \(appName)",
             action: #selector(NSApplication.terminate(_:)),
@@ -73,6 +85,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         facesItem.submenu = facesMenu
 
         NSApplication.shared.mainMenu = mainMenu
+    }
+
+    // MARK: - Settings
+
+    @MainActor
+    @objc private func openSettings(_ sender: Any?) {
+        if settingsController == nil {
+            settingsController = SettingsWindowController()
+        }
+        settingsController?.showWindow(nil)
+        settingsController?.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     // MARK: - Face enrollment

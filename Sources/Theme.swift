@@ -95,40 +95,53 @@ enum Theme {
         /// Minimum normalized area for a box to be drawn (filters out tiny noise regions).
         static let minBoxArea: CGFloat = 0.001
 
-        /// Sobel magnitude threshold for the edges pane. Higher values produce
-        /// fewer, more confident edge pixels. Values are unit-normalized [0..1].
-        static let edgeThreshold: Float = 0.18
-
-        /// ASCII art pane: number of character cells across the pane horizontally.
-        /// The vertical cell count is derived to match the source aspect ratio.
-        static let asciiColumns: Int = 120
-
-        /// Minimum top-label confidence (0..1) for a YOLO detection to be drawn.
-        /// Lower values surface more objects but include weaker guesses.
-        static let detectionMinConfidence: Float = 0.30
-
         /// Bundled object detector model. The .mlmodel file must live under
         /// `Sources/Resources/Models/<name>.mlmodel` so Xcode compiles it into
         /// the app bundle as `<name>.mlmodelc`.
         static let detectorModelName: String = "YOLOv3"
 
+        // MARK: - Live tunables
+        //
+        // These values are mutated at runtime by the Settings panel. Detector
+        // and renderer code paths read them many times per second from various
+        // queues; primitives (Float/Double/Int) are word-sized on Apple
+        // Silicon so the explicit `nonisolated(unsafe)` is honest about the
+        // intent: cooperative single-writer (MainActor UI) and many readers.
+
+        /// Sobel magnitude threshold for the edges pane. Higher values produce
+        /// fewer, more confident edge pixels. Values are unit-normalized [0..1].
+        nonisolated(unsafe) static var edgeThreshold: Float = 0.18
+
+        /// ASCII art pane: number of character cells across the pane horizontally.
+        /// The vertical cell count is derived to match the source aspect ratio.
+        nonisolated(unsafe) static var asciiColumns: Int = 120
+
+        /// Minimum top-label confidence (0..1) for a YOLO detection to be drawn.
+        /// Lower values surface more objects but include weaker guesses.
+        nonisolated(unsafe) static var detectionMinConfidence: Float = 0.30
+
         /// How often YOLO re-detects (Hz). Between detections, `VNTrackObjectRequest`
         /// updates positions on every submitted frame, so boxes follow objects
         /// smoothly. Lower the rate to spend less ANE budget on detection.
-        static let yoloDetectionHz: Double = 5.0
+        nonisolated(unsafe) static var yoloDetectionHz: Double = 5.0
 
         /// Tracks expire if YOLO doesn't re-confirm them within this many seconds.
         /// Cover brief occlusions but drop ghosts of objects that left the scene.
-        static let trackMaxAgeSeconds: Double = 0.6
+        nonisolated(unsafe) static var trackMaxAgeSeconds: Double = 0.6
 
         /// Minimum tracker confidence to keep a track alive between YOLO refreshes.
         /// Vision's tracker reports 0..1; anything below this is treated as lost.
-        static let trackerMinConfidence: Float = 0.3
+        nonisolated(unsafe) static var trackerMinConfidence: Float = 0.3
 
         /// IoU threshold for matching a new YOLO detection to an existing track.
         /// Above this, the existing track is refreshed; below, a new track is
         /// bootstrapped.
-        static let trackMatchIoU: Float = 0.4
+        nonisolated(unsafe) static var trackMatchIoU: Float = 0.4
+
+        /// Face match threshold for FaceRegistry. Tuned for image-FeaturePrint
+        /// distances on padded face crops (those run ~10–25; same-person
+        /// matches usually <18, different people >25).
+        nonisolated(unsafe) static var faceMatchThreshold: Float = 18.0
     }
 
     // MARK: - Tick

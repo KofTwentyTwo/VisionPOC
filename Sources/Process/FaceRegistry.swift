@@ -16,11 +16,12 @@ import os
 /// - 1.0+ → different people
 final class FaceRegistry: @unchecked Sendable {
     /// Match threshold. Distances below this are considered the same person.
-    /// Tuned for `VNGenerateImageFeaturePrintRequest` running on padded face
-    /// crops — those produce general-purpose image embeddings (not face-
-    /// specific), so the threshold sits a bit higher than Apple's published
-    /// face-FeaturePrint guidance (~0.6).
-    var matchThreshold: Float = 18.0
+    /// Sourced from `Theme.Performance.faceMatchThreshold` so the Settings
+    /// panel slider can adjust it live.
+    var matchThreshold: Float {
+        get { Theme.Performance.faceMatchThreshold }
+        set { Theme.Performance.faceMatchThreshold = newValue }
+    }
 
     private var lock = os_unfair_lock_s()
     private var templates: [String: [VNFeaturePrintObservation]] = [:]
