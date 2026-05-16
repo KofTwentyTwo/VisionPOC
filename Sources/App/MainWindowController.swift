@@ -1,14 +1,17 @@
 import AppKit
+import AVFoundation
 import MetalKit
 
-final class MainWindowController: NSWindowController {
+final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let mtkView: MTKView
     private let capture: CameraCapture
     let detector: ObjectDetector
     private let edgePass: EdgePass
     private let jarvisPass: JarvisStylePass
     private let asciiPass: AsciiPass
-    private let renderer: Renderer
+    let renderer: Renderer
+
+    private static let frameDefaultsKey = "VPOC.MainWindowFrame"
 
     init() {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -72,6 +75,9 @@ final class MainWindowController: NSWindowController {
         view.delegate = renderer
 
         super.init(window: window)
+
+        window.delegate = self
+        restoreFrame()
     }
 
     required init?(coder: NSCoder) {
@@ -82,5 +88,54 @@ final class MainWindowController: NSWindowController {
         super.showWindow(sender)
         window?.makeKeyAndOrderFront(sender)
         Task { await capture.start() }
+    }
+
+    // MARK: - Camera
+
+    var activeCameraUniqueID: String? {
+        capture.activeDeviceUniqueID
+    }
+
+    func switchCamera(to device: AVCaptureDevice) {
+        capture.switchToDevice(device)
+    }
+
+    // MARK: - Snapshot
+
+    @MainActor
+    func saveSnapshotToDesktop() {
+        guard let data = renderer.snapshotPNG() else {
+            LogStream.shared.log("snapshot failed (renderer returned nil)", level: .warn, source: .app)
+            return
+        }
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd-HHmmss"
+        let name = "VisionPOC-\(df.string(from: Date())).png"
+        let url = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask)[0].appendingPathComponent(name)
+        do {
+            try data.write(to: url)
+            LogStream.shared.log("saved \(url.lastPathComponent)", level: .info, source: .app)
+        } catch {
+            LogStream.shared.log("snapshot write failed: \(error)", level: .error, source: .app)
+        }
+    }
+
+    // MARK: - Window persistence
+
+    private func restoreFrame() {
+        guard let window,
+              let saved = UserDefaults.standard.string(forKey: MainWindowController.frameDefaultsKey) else {
+            return
+        }
+        let rect = NSRectFromString(saved)
+        if rect.size.width > 0 && rect.size.height > 0 {
+            window.setFrame(rect, display: false)
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let window else { return }
+        UserDefaults.standard.set(NSStringFromRect(window.frame),
+                                  forKey: MainWindowController.frameDefaultsKey)
     }
 }

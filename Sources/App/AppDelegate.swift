@@ -1,12 +1,14 @@
 import AppKit
+import AVFoundation
 import CoreText
 import Vision
 
 @main
-final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unchecked Sendable {
     private var windowController: MainWindowController?
     @MainActor private var settingsController: SettingsWindowController?
     @MainActor private var logController: LogStreamWindowController?
+    @MainActor private var cameraDevicesSubmenu: NSMenu?
 
     static func main() {
         let app = NSApplication.shared
@@ -63,6 +65,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
         appMenu.addItem(.separator())
 
+        let snapshot = NSMenuItem(
+            title: "Save Snapshot",
+            action: #selector(saveSnapshot(_:)),
+            keyEquivalent: "s"
+        )
+        snapshot.keyEquivalentModifierMask = [.command]
+        snapshot.target = self
+        appMenu.addItem(snapshot)
+
+        appMenu.addItem(.separator())
+
         let quit = NSMenuItem(
             title: "Quit \(appName)",
             action: #selector(NSApplication.terminate(_:)),
@@ -97,7 +110,91 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
         facesItem.submenu = facesMenu
 
+        // Camera menu — device picker (dynamic) + manual refresh.
+        let cameraItem = NSMenuItem()
+        mainMenu.addItem(cameraItem)
+        let cameraMenu = NSMenu(title: "Camera")
+
+        let devicesItem = NSMenuItem(title: "Devices", action: nil, keyEquivalent: "")
+        let devicesSubmenu = NSMenu(title: "Devices")
+        devicesSubmenu.delegate = self
+        devicesItem.submenu = devicesSubmenu
+        cameraDevicesSubmenu = devicesSubmenu
+        cameraMenu.addItem(devicesItem)
+
+        let refreshItem = NSMenuItem(
+            title: "Refresh List",
+            action: #selector(refreshCameraList(_:)),
+            keyEquivalent: ""
+        )
+        refreshItem.target = self
+        cameraMenu.addItem(refreshItem)
+
+        cameraItem.submenu = cameraMenu
+
         NSApplication.shared.mainMenu = mainMenu
+    }
+
+    // MARK: - Camera menu (dynamic)
+
+    @MainActor
+    @objc func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === cameraDevicesSubmenu else { return }
+        rebuildCameraDevicesMenu(menu)
+    }
+
+    @MainActor
+    private func rebuildCameraDevicesMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
+
+        let discovery = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInWideAngleCamera, .external, .continuityCamera],
+            mediaType: .video,
+            position: .unspecified
+        )
+        let devices = discovery.devices
+
+        if devices.isEmpty {
+            let empty = NSMenuItem(title: "No cameras found", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+            return
+        }
+
+        let activeID = windowController?.activeCameraUniqueID
+        for device in devices {
+            let item = NSMenuItem(
+                title: device.localizedName,
+                action: #selector(selectCameraDevice(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = device
+            if device.uniqueID == activeID {
+                item.state = .on
+            }
+            menu.addItem(item)
+        }
+    }
+
+    @MainActor
+    @objc private func refreshCameraList(_ sender: Any?) {
+        guard let menu = cameraDevicesSubmenu else { return }
+        rebuildCameraDevicesMenu(menu)
+    }
+
+    @MainActor
+    @objc private func selectCameraDevice(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem,
+              let device = item.representedObject as? AVCaptureDevice else { return }
+        windowController?.switchCamera(to: device)
+    }
+
+    // MARK: - Snapshot
+
+    @MainActor
+    @objc private func saveSnapshot(_ sender: Any?) {
+        windowController?.saveSnapshotToDesktop()
     }
 
     // MARK: - Settings

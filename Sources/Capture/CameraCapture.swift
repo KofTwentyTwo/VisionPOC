@@ -22,12 +22,16 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     private let sessionQueue = DispatchQueue(label: "com.dmdbrands.VisionPOC.capture.session")
     private let sampleQueue = DispatchQueue(label: "com.dmdbrands.VisionPOC.capture.samples")
     private var textureCache: CVMetalTextureCache?
+    private var currentInput: AVCaptureDeviceInput?
+    private var output: AVCaptureVideoDataOutput?
 
     private var lock = os_unfair_lock_s()
     private var latest: Frame?
     private var _permissionDenied = false
+    private var _deviceDisconnected = false
     private var _width: Int = 1920
     private var _height: Int = 1080
+    private var _activeDeviceUniqueID: String?
 
     init(device: MTLDevice) {
         self.device = device
@@ -38,12 +42,31 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             NSLog("CVMetalTextureCacheCreate failed: \(status)")
         }
         self.textureCache = cache
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleDeviceDisconnected(_:)),
+            name: .AVCaptureDeviceWasDisconnected,
+            object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     var permissionDenied: Bool {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
-        return _permissionDenied
+        // Treat disconnect as "permission denied" so renderer falls back to its
+        // existing "WAITING FOR CAMERA…" status path without modification.
+        return _permissionDenied || _deviceDisconnected
+    }
+
+    var deviceDisconnected: Bool {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        return _deviceDisconnected
     }
 
     var width: Int {
@@ -56,6 +79,12 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
         return _height
+    }
+
+    var activeDeviceUniqueID: String? {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        return _activeDeviceUniqueID
     }
 
     func latestTexture() -> MTLTexture? {
@@ -108,7 +137,7 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             }
 
             let discovery = AVCaptureDevice.DiscoverySession(
-                deviceTypes: [.builtInWideAngleCamera, .external],
+                deviceTypes: [.builtInWideAngleCamera, .external, .continuityCamera],
                 mediaType: .video,
                 position: .unspecified
             )
@@ -129,6 +158,7 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                 let input = try AVCaptureDeviceInput(device: camera)
                 if self.session.canAddInput(input) {
                     self.session.addInput(input)
+                    self.currentInput = input
                 }
             } catch {
                 self.session.commitConfiguration()
@@ -146,11 +176,103 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             if self.session.canAddOutput(output) {
                 self.session.addOutput(output)
             }
+            self.output = output
+
+            os_unfair_lock_lock(&self.lock)
+            self._activeDeviceUniqueID = camera.uniqueID
+            os_unfair_lock_unlock(&self.lock)
 
             self.session.commitConfiguration()
             self.session.startRunning()
             LogStream.shared.log("session running, preset \(Theme.Performance.capturePreset.rawValue)",
                                  level: .info, source: .camera)
+        }
+    }
+
+    /// Switch the running session over to a different camera device. Safe to call
+    /// from the main thread — actual session reconfiguration happens on sessionQueue.
+    func switchToDevice(_ device: AVCaptureDevice) {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+
+            if self.session.isRunning {
+                self.session.stopRunning()
+            }
+
+            self.session.beginConfiguration()
+
+            if let existing = self.currentInput {
+                self.session.removeInput(existing)
+                self.currentInput = nil
+            }
+
+            do {
+                let input = try AVCaptureDeviceInput(device: device)
+                if self.session.canAddInput(input) {
+                    self.session.addInput(input)
+                    self.currentInput = input
+                } else {
+                    self.session.commitConfiguration()
+                    LogStream.shared.log("cannot add input for \(device.localizedName)", level: .error, source: .camera)
+                    return
+                }
+            } catch {
+                self.session.commitConfiguration()
+                LogStream.shared.log("failed to create input for \(device.localizedName): \(error)",
+                                     level: .error, source: .camera)
+                return
+            }
+
+            // If the output got dropped (e.g., never created yet), re-add it.
+            if self.output == nil {
+                let output = AVCaptureVideoDataOutput()
+                output.videoSettings = [
+                    kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                    kCVPixelBufferMetalCompatibilityKey as String: true
+                ]
+                output.alwaysDiscardsLateVideoFrames = true
+                output.setSampleBufferDelegate(self, queue: self.sampleQueue)
+                if self.session.canAddOutput(output) {
+                    self.session.addOutput(output)
+                }
+                self.output = output
+            }
+
+            os_unfair_lock_lock(&self.lock)
+            self._activeDeviceUniqueID = device.uniqueID
+            self._deviceDisconnected = false
+            // Best-effort default; real dimensions arrive with the first sample buffer.
+            self._width = 1920
+            self._height = 1080
+            os_unfair_lock_unlock(&self.lock)
+
+            self.session.commitConfiguration()
+            self.session.startRunning()
+
+            LogStream.shared.log("switched to \(device.localizedName)", level: .info, source: .camera)
+        }
+    }
+
+    @objc private func handleDeviceDisconnected(_ note: Notification) {
+        guard let disconnected = note.object as? AVCaptureDevice else { return }
+
+        os_unfair_lock_lock(&lock)
+        let activeID = _activeDeviceUniqueID
+        os_unfair_lock_unlock(&lock)
+
+        guard disconnected.uniqueID == activeID else { return }
+
+        let name = disconnected.localizedName
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            if self.session.isRunning {
+                self.session.stopRunning()
+            }
+            os_unfair_lock_lock(&self.lock)
+            self._deviceDisconnected = true
+            self.latest = nil
+            os_unfair_lock_unlock(&self.lock)
+            LogStream.shared.log("camera \(name) disconnected", level: .warn, source: .camera)
         }
     }
 

@@ -25,6 +25,13 @@ enum Theme {
         static let boxStroke = SIMD4<Float>(0.20, 0.95, 1.00, 1.0)
         /// Bounding-box label background.
         static let boxLabelBg = SIMD4<Float>(0.0, 0.15, 0.18, 0.85)
+
+        /// Text-recognition (OCR) overlay color — distinct from object boxes.
+        static let textStroke = SIMD4<Float>(1.00, 0.45, 0.85, 1.0)   // magenta
+        /// Body-pose skeleton color.
+        static let bodyPose = SIMD4<Float>(0.30, 1.00, 0.80, 1.0)     // mint
+        /// Hand-pose skeleton color.
+        static let handPose = SIMD4<Float>(1.00, 0.75, 0.20, 1.0)     // amber
     }
 
     // MARK: - Layout

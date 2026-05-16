@@ -43,6 +43,9 @@ final class ObjectDetector: @unchecked Sendable {
 
     private var lock = os_unfair_lock_s()
     private var _currentDetections: [Detection] = []
+    private var _currentTextDetections: [TextDetection] = []
+    private var _currentPoses: [PoseDetection] = []
+    private var _lastDetectMode: DetectMode = .yolo
     private var _lastInferenceMs: Double = 0
     private var _inFlight = false
 
@@ -62,6 +65,53 @@ final class ObjectDetector: @unchecked Sendable {
             LogStream.shared.log(failure + " — falling back to Vision built-ins only.", level: .warn, source: .detect)
         } else {
             LogStream.shared.log("loaded \(Theme.Performance.detectorModelName), tracker enabled (~5 Hz YOLO + ~60 Hz tracker)", level: .info, source: .detect)
+        }
+
+        // Warm up the YOLO model on the detector queue so the first user-visible
+        // detection doesn't pay ~200ms of CoreML/ANE compile latency. Dispatched
+        // async so init() returns immediately and app launch isn't blocked.
+        queue.async { [weak self] in
+            self?.warmUpYolo()
+        }
+    }
+
+    private func warmUpYolo() {
+        guard let yolo = yoloRequest else { return }
+        let start = CFAbsoluteTimeGetCurrent()
+
+        // 416x416 mid-gray bitmap — YOLO's typical input size. The model will
+        // rescale internally if needed; what matters is the CoreML graph gets
+        // compiled and the ANE picks up the weights.
+        let width = 416
+        let height = 416
+        let bytesPerRow = width * 4
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            LogStream.shared.log("yolo warmup skipped: bitmap context alloc failed", level: .warn, source: .detect)
+            return
+        }
+        ctx.setFillColor(CGColor(red: 0.5, green: 0.5, blue: 0.5, alpha: 1.0))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        guard let cgImage = ctx.makeImage() else {
+            LogStream.shared.log("yolo warmup skipped: cgImage creation failed", level: .warn, source: .detect)
+            return
+        }
+
+        let handler = VNImageRequestHandler(cgImage: cgImage, orientation: .up, options: [:])
+        do {
+            try handler.perform([yolo])
+            let ms = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
+            LogStream.shared.log("warmed up YOLO in \(String(format: "%.0f", ms))ms", level: .debug, source: .detect)
+        } catch {
+            LogStream.shared.log("yolo warmup failed: \(error)", level: .warn, source: .detect)
         }
     }
 
@@ -96,6 +146,24 @@ final class ObjectDetector: @unchecked Sendable {
         return _currentDetections
     }
 
+    func currentTextDetections() -> [TextDetection] {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        return _currentTextDetections
+    }
+
+    func currentPoses() -> [PoseDetection] {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        return _currentPoses
+    }
+
+    var lastDetectMode: DetectMode {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        return _lastDetectMode
+    }
+
     func submit(pixelBuffer: CVPixelBuffer) {
         os_unfair_lock_lock(&lock)
         if _inFlight {
@@ -118,11 +186,19 @@ final class ObjectDetector: @unchecked Sendable {
         let yoloInterval = 1.0 / max(0.5, Theme.Performance.yoloDetectionHz)
         let shouldDetect = (start - lastYoloAt) >= yoloInterval
 
+        var newTextDetections: [TextDetection] = []
+        var newPoses: [PoseDetection] = []
+        let detectMode: DetectMode
+
         if shouldDetect {
-            detectAndBootstrap(pixelBuffer: pixelBuffer, now: start)
+            let extras = detectAndBootstrap(pixelBuffer: pixelBuffer, now: start)
+            newTextDetections = extras.text
+            newPoses = extras.poses
             lastYoloAt = start
+            detectMode = .yolo
         } else {
             trackOnly(pixelBuffer: pixelBuffer, now: start)
+            detectMode = .track
         }
 
         // Drop tracks that have aged out (no YOLO refresh recently).
@@ -157,6 +233,14 @@ final class ObjectDetector: @unchecked Sendable {
 
         os_unfair_lock_lock(&lock)
         _currentDetections = snapshot
+        if shouldDetect {
+            // Only refresh text & poses on YOLO-cadence frames; tracker frames
+            // keep the most recent set so the renderer doesn't flicker between
+            // populated and empty in the ~50ms between YOLO refreshes.
+            _currentTextDetections = newTextDetections
+            _currentPoses = newPoses
+        }
+        _lastDetectMode = detectMode
         _lastInferenceMs = elapsedMs
         _inFlight = false
         os_unfair_lock_unlock(&lock)
@@ -164,10 +248,19 @@ final class ObjectDetector: @unchecked Sendable {
 
     // MARK: - YOLO + supplementary detectors
 
-    private func detectAndBootstrap(pixelBuffer: CVPixelBuffer, now: CFAbsoluteTime) {
+    private func detectAndBootstrap(pixelBuffer: CVPixelBuffer, now: CFAbsoluteTime) -> (text: [TextDetection], poses: [PoseDetection]) {
         let faces = VNDetectFaceRectanglesRequest()
         let animals = VNRecognizeAnimalsRequest()
-        var requests: [VNRequest] = [faces, animals]
+
+        let text = VNRecognizeTextRequest()
+        text.recognitionLevel = .accurate
+        text.usesLanguageCorrection = true
+
+        let bodyPose = VNDetectHumanBodyPoseRequest()
+        let handPose = VNDetectHumanHandPoseRequest()
+        handPose.maximumHandCount = 2
+
+        var requests: [VNRequest] = [faces, animals, text, bodyPose, handPose]
         if let yolo = yoloRequest {
             requests.append(yolo)
         }
@@ -248,6 +341,156 @@ final class ObjectDetector: @unchecked Sendable {
                                      level: .info, source: .track)
             }
         }
+
+        // ---- Text recognition ----
+        let textDetections: [TextDetection] = (text.results ?? []).compactMap { obs in
+            guard let top = obs.topCandidates(1).first else { return nil }
+            return TextDetection(rect: obs.boundingBox, text: top.string, confidence: top.confidence)
+        }
+
+        // ---- Body pose ----
+        var bodyPoses: [PoseDetection] = []
+        if let bodyResults = bodyPose.results {
+            for obs in bodyResults {
+                if let pose = makeBodyPose(from: obs) {
+                    bodyPoses.append(pose)
+                }
+            }
+        }
+
+        // ---- Hand pose ----
+        var handPoses: [PoseDetection] = []
+        if let handResults = handPose.results {
+            for obs in handResults {
+                if let pose = makeHandPose(from: obs) {
+                    handPoses.append(pose)
+                }
+            }
+        }
+
+        return (text: textDetections, poses: bodyPoses + handPoses)
+    }
+
+    // MARK: - Pose builders
+
+    private static let poseConfidenceThreshold: Float = 0.3
+
+    private func makeBodyPose(from obs: VNHumanBodyPoseObservation) -> PoseDetection? {
+        // Apple's SDK joint names. We map each to its CGPoint via
+        // recognizedPoint(_:); points with confidence > threshold are kept.
+        typealias J = VNHumanBodyPoseObservation.JointName
+        let connections: [(J, J)] = [
+            (.nose, .neck),
+            (.neck, .leftShoulder),
+            (.leftShoulder, .leftElbow),
+            (.leftElbow, .leftWrist),
+            (.neck, .rightShoulder),
+            (.rightShoulder, .rightElbow),
+            (.rightElbow, .rightWrist),
+            (.neck, .root),
+            (.root, .leftHip),
+            (.leftHip, .leftKnee),
+            (.leftKnee, .leftAnkle),
+            (.root, .rightHip),
+            (.rightHip, .rightKnee),
+            (.rightKnee, .rightAnkle)
+        ]
+
+        var segments: [PoseDetection.Segment] = []
+        // Use a small key->point map keyed by joint rawValue so points stay
+        // unique even if a joint appears in multiple connections.
+        var uniquePoints: [String: CGPoint] = [:]
+        var maxConf: Float = 0
+
+        for (a, b) in connections {
+            guard
+                let p1 = try? obs.recognizedPoint(a),
+                let p2 = try? obs.recognizedPoint(b)
+            else { continue }
+            if p1.confidence > ObjectDetector.poseConfidenceThreshold {
+                uniquePoints[a.rawValue.rawValue] = p1.location
+                maxConf = max(maxConf, p1.confidence)
+            }
+            if p2.confidence > ObjectDetector.poseConfidenceThreshold {
+                uniquePoints[b.rawValue.rawValue] = p2.location
+                maxConf = max(maxConf, p2.confidence)
+            }
+            if p1.confidence > ObjectDetector.poseConfidenceThreshold,
+               p2.confidence > ObjectDetector.poseConfidenceThreshold {
+                segments.append(PoseDetection.Segment(start: p1.location, end: p2.location))
+            }
+        }
+
+        if segments.isEmpty && uniquePoints.isEmpty { return nil }
+        return PoseDetection(
+            segments: segments,
+            points: Array(uniquePoints.values),
+            kind: .body,
+            confidence: maxConf
+        )
+    }
+
+    private func makeHandPose(from obs: VNHumanHandPoseObservation) -> PoseDetection? {
+        typealias J = VNHumanHandPoseObservation.JointName
+
+        // Each finger chain: tip -> middle phalange -> proximal -> metacarpal/base.
+        // Apple's hand-pose joint names (verified against the macOS SDK):
+        //   thumb:   thumbTip,  thumbIP,  thumbMP,  thumbCMC
+        //   index:   indexTip,  indexDIP, indexPIP, indexMCP
+        //   middle:  middleTip, middleDIP,middlePIP,middleMCP
+        //   ring:    ringTip,   ringDIP,  ringPIP,  ringMCP
+        //   little:  littleTip, littleDIP,littlePIP,littleMCP
+        let fingerChains: [[J]] = [
+            [.thumbTip, .thumbIP, .thumbMP, .thumbCMC],
+            [.indexTip, .indexDIP, .indexPIP, .indexMCP],
+            [.middleTip, .middleDIP, .middlePIP, .middleMCP],
+            [.ringTip, .ringDIP, .ringPIP, .ringMCP],
+            [.littleTip, .littleDIP, .littlePIP, .littleMCP]
+        ]
+        // Palm ring: connect the 5 base/knuckle joints around the palm.
+        // Start at thumb base (CMC) and walk index→middle→ring→little MCPs,
+        // then close the ring back to the thumb base.
+        let palmRing: [J] = [.thumbCMC, .indexMCP, .middleMCP, .ringMCP, .littleMCP, .thumbCMC]
+
+        var segments: [PoseDetection.Segment] = []
+        var uniquePoints: [String: CGPoint] = [:]
+        var maxConf: Float = 0
+
+        func addPoint(_ name: J) -> (location: CGPoint, ok: Bool) {
+            guard let p = try? obs.recognizedPoint(name) else { return (.zero, false) }
+            if p.confidence > ObjectDetector.poseConfidenceThreshold {
+                uniquePoints[name.rawValue.rawValue] = p.location
+                maxConf = max(maxConf, p.confidence)
+                return (p.location, true)
+            }
+            return (.zero, false)
+        }
+
+        for chain in fingerChains {
+            for i in 0..<(chain.count - 1) {
+                let a = addPoint(chain[i])
+                let b = addPoint(chain[i + 1])
+                if a.ok && b.ok {
+                    segments.append(PoseDetection.Segment(start: a.location, end: b.location))
+                }
+            }
+        }
+
+        for i in 0..<(palmRing.count - 1) {
+            let a = addPoint(palmRing[i])
+            let b = addPoint(palmRing[i + 1])
+            if a.ok && b.ok {
+                segments.append(PoseDetection.Segment(start: a.location, end: b.location))
+            }
+        }
+
+        if segments.isEmpty && uniquePoints.isEmpty { return nil }
+        return PoseDetection(
+            segments: segments,
+            points: Array(uniquePoints.values),
+            kind: .hand,
+            confidence: maxConf
+        )
     }
 
     // MARK: - Tracker-only update
