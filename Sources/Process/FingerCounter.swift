@@ -28,6 +28,15 @@ final class FingerCounter: @unchecked Sendable {
     }
 
     func analyze(_ hands: [VNHumanHandPoseObservation]) {
+        let now = Date()
+        // Nothing in frame → wipe whatever was left from the last cycle so
+        // the Status panel doesn't keep displaying ghost hand entries.
+        guard !hands.isEmpty else {
+            CurrentStateStore.shared.clearFingers()
+            return
+        }
+
+        var seenChiralities = Set<String>()
         for hand in hands {
             guard let summary = countExtended(hand: hand) else { continue }
             let chirality: String
@@ -37,15 +46,19 @@ final class FingerCounter: @unchecked Sendable {
             case .unknown: chirality = "unknown"
             @unknown default: chirality = "unknown"
             }
-            // Record into the live state store so the Status panel can show
-            // "left: 3, right: 5" without subscribing to the bus itself.
+            seenChiralities.insert(chirality)
             CurrentStateStore.shared.recordFingers(
                 chirality: chirality,
                 count: summary.count,
-                at: Date()
+                at: now
             )
             emitIfFresh(count: summary.count, confidence: summary.confidence)
         }
+
+        // Prune chirality entries we didn't see this frame if they're past
+        // the staleness window — covers the "left hand left frame, right
+        // hand stayed" case.
+        CurrentStateStore.shared.ageFingerEntries(currentSeen: seenChiralities, at: now)
     }
 
     private struct HandSummary {

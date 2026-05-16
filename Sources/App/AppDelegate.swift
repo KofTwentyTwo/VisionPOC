@@ -49,143 +49,90 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     @MainActor
     private func installMainMenu() {
         let mainMenu = NSMenu()
+        let appName = ProcessInfo.processInfo.processName
 
-        // Application menu (Settings, Quit).
+        // -----------------------------------------------------------------
+        // Application menu (VisionPOC): app-level commands only — Settings,
+        // Hide, Quit. Convention: Mac apps put their config and
+        // lifecycle here, NOT everything that doesn't fit elsewhere.
+        // -----------------------------------------------------------------
         let appMenuItem = NSMenuItem()
         mainMenu.addItem(appMenuItem)
         let appMenu = NSMenu()
-        let appName = ProcessInfo.processInfo.processName
-
-        let settings = NSMenuItem(
-            title: "Settings…",
-            action: #selector(openSettings(_:)),
-            keyEquivalent: ","
-        )
-        settings.keyEquivalentModifierMask = [.command]
-        settings.target = self
-        appMenu.addItem(settings)
-
-        let logStream = NSMenuItem(
-            title: "Log Stream…",
-            action: #selector(openLogStream(_:)),
-            keyEquivalent: "l"
-        )
-        logStream.keyEquivalentModifierMask = [.command]
-        logStream.target = self
-        appMenu.addItem(logStream)
-
-        let statusPanel = NSMenuItem(
-            title: "Status…",
-            action: #selector(openStatus(_:)),
-            keyEquivalent: "i"
-        )
-        statusPanel.keyEquivalentModifierMask = [.command]
-        statusPanel.target = self
-        appMenu.addItem(statusPanel)
-
+        appMenu.addItem(menuItem("Settings…", action: #selector(openSettings(_:)), key: ",", mods: [.command]))
         appMenu.addItem(.separator())
-
-        let snapshot = NSMenuItem(
-            title: "Save Snapshot",
-            action: #selector(saveSnapshot(_:)),
-            keyEquivalent: "s"
-        )
-        snapshot.keyEquivalentModifierMask = [.command]
-        snapshot.target = self
-        appMenu.addItem(snapshot)
-
-        let record = NSMenuItem(
-            title: "Start Recording",
-            action: #selector(toggleRecording(_:)),
-            keyEquivalent: "r"
-        )
-        record.keyEquivalentModifierMask = [.command, .shift]
-        record.target = self
-        appMenu.addItem(record)
-        recordMenuItem = record
-
+        appMenu.addItem(menuItem("Hide \(appName)", action: #selector(NSApplication.hide(_:)), key: "h", mods: [.command], target: NSApp))
+        let hideOthers = menuItem("Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), key: "h", mods: [.command, .option], target: NSApp)
+        appMenu.addItem(hideOthers)
+        appMenu.addItem(menuItem("Show All", action: #selector(NSApplication.unhideAllApplications(_:)), key: "", mods: [], target: NSApp))
         appMenu.addItem(.separator())
-
-        let quit = NSMenuItem(
-            title: "Quit \(appName)",
-            action: #selector(NSApplication.terminate(_:)),
-            keyEquivalent: "q"
-        )
-        quit.keyEquivalentModifierMask = [.command]
-        appMenu.addItem(quit)
+        appMenu.addItem(menuItem("Quit \(appName)", action: #selector(NSApplication.terminate(_:)), key: "q", mods: [.command]))
         appMenuItem.submenu = appMenu
 
-        // Faces menu — enrollment + forgetting.
-        let facesItem = NSMenuItem()
-        mainMenu.addItem(facesItem)
-        let facesMenu = NSMenu(title: "Faces")
+        // -----------------------------------------------------------------
+        // File menu — actions that write something to disk.
+        // -----------------------------------------------------------------
+        let fileItem = NSMenuItem()
+        mainMenu.addItem(fileItem)
+        let fileMenu = NSMenu(title: "File")
+        fileMenu.addItem(menuItem("Save Snapshot", action: #selector(saveSnapshot(_:)), key: "s", mods: [.command]))
+        let record = menuItem("Start Recording", action: #selector(toggleRecording(_:)), key: "r", mods: [.command, .shift])
+        fileMenu.addItem(record)
+        recordMenuItem = record
+        fileItem.submenu = fileMenu
 
-        let enrollItem = NSMenuItem(
-            title: "Enroll Face…",
-            action: #selector(enrollFace(_:)),
-            keyEquivalent: "e"
-        )
-        enrollItem.keyEquivalentModifierMask = [.command]
-        enrollItem.target = self
-        facesMenu.addItem(enrollItem)
+        // -----------------------------------------------------------------
+        // View menu — windows / panels you can open. All of these are
+        // observability surfaces over the same underlying detector +
+        // event-bus state.
+        // -----------------------------------------------------------------
+        let viewItem = NSMenuItem()
+        mainMenu.addItem(viewItem)
+        let viewMenu = NSMenu(title: "View")
+        viewMenu.addItem(menuItem("Status Panel", action: #selector(openStatus(_:)), key: "i", mods: [.command]))
+        viewMenu.addItem(menuItem("Detection History", action: #selector(openHistory(_:)), key: "h", mods: [.command, .shift]))
+        viewMenu.addItem(menuItem("Log Stream", action: #selector(openLogStream(_:)), key: "l", mods: [.command]))
+        viewItem.submenu = viewMenu
 
-        let forgetItem = NSMenuItem(
-            title: "Forget Face…",
-            action: #selector(forgetFace(_:)),
-            keyEquivalent: "e"
-        )
-        forgetItem.keyEquivalentModifierMask = [.command, .shift]
-        forgetItem.target = self
-        facesMenu.addItem(forgetItem)
-
-        facesMenu.addItem(.separator())
-
-        let historyItem = NSMenuItem(
-            title: "Detection History…",
-            action: #selector(openHistory(_:)),
-            keyEquivalent: "h"
-        )
-        historyItem.keyEquivalentModifierMask = [.command]
-        historyItem.target = self
-        facesMenu.addItem(historyItem)
-
-        facesItem.submenu = facesMenu
-
-        // Camera menu — device picker (dynamic) + manual refresh.
+        // -----------------------------------------------------------------
+        // Camera menu — devices listed directly (no nested submenu), then
+        // Refresh, then Privacy. Privacy lives here because its primary
+        // effect is gating what the camera-facing detectors do.
+        // -----------------------------------------------------------------
         let cameraItem = NSMenuItem()
         mainMenu.addItem(cameraItem)
         let cameraMenu = NSMenu(title: "Camera")
-
-        let devicesItem = NSMenuItem(title: "Devices", action: nil, keyEquivalent: "")
-        let devicesSubmenu = NSMenu(title: "Devices")
-        devicesSubmenu.delegate = self
-        devicesItem.submenu = devicesSubmenu
-        cameraDevicesSubmenu = devicesSubmenu
-        cameraMenu.addItem(devicesItem)
-
-        let refreshItem = NSMenuItem(
-            title: "Refresh List",
-            action: #selector(refreshCameraList(_:)),
-            keyEquivalent: ""
-        )
-        refreshItem.target = self
-        cameraMenu.addItem(refreshItem)
-
-        cameraMenu.addItem(.separator())
-
-        let privacy = NSMenuItem(
-            title: "Privacy Mode: OFF",
-            action: #selector(togglePrivacyMode(_:)),
-            keyEquivalent: "p"
-        )
-        privacy.keyEquivalentModifierMask = [.command, .shift]
-        privacy.target = self
-        cameraMenu.addItem(privacy)
-        privacyMenuItem = privacy
-
+        cameraMenu.delegate = self
+        // The dynamic device list is rebuilt by menuNeedsUpdate(_:) each
+        // time the menu opens. We retain a reference so the rebuild and
+        // the privacy/refresh items stay distinct.
+        cameraDevicesSubmenu = cameraMenu
         cameraItem.submenu = cameraMenu
 
+        // -----------------------------------------------------------------
+        // Faces menu — enrollment of known people.
+        // -----------------------------------------------------------------
+        let facesItem = NSMenuItem()
+        mainMenu.addItem(facesItem)
+        let facesMenu = NSMenu(title: "Faces")
+        facesMenu.addItem(menuItem("Enroll Face…", action: #selector(enrollFace(_:)), key: "e", mods: [.command]))
+        facesMenu.addItem(menuItem("Forget Face…", action: #selector(forgetFace(_:)), key: "e", mods: [.command, .shift]))
+        facesItem.submenu = facesMenu
+
         NSApplication.shared.mainMenu = mainMenu
+    }
+
+    /// Small helper to keep the menu-building above readable.
+    @MainActor
+    private func menuItem(_ title: String,
+                          action: Selector?,
+                          key: String,
+                          mods: NSEvent.ModifierFlags,
+                          target: AnyObject? = nil) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        item.keyEquivalentModifierMask = mods
+        item.target = target ?? self
+        return item
     }
 
     // MARK: - Camera menu (dynamic)
@@ -198,6 +145,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
     @MainActor
     private func rebuildCameraDevicesMenu(_ menu: NSMenu) {
+        // Rebuilds the entire Camera menu in place: device list (flat),
+        // separator, Refresh List, separator, Privacy Mode toggle.
         menu.removeAllItems()
 
         let discovery = AVCaptureDevice.DiscoverySession(
@@ -211,23 +160,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             let empty = NSMenuItem(title: "No cameras found", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             menu.addItem(empty)
-            return
+        } else {
+            let activeID = windowController?.activeCameraUniqueID
+            for device in devices {
+                let item = NSMenuItem(
+                    title: device.localizedName,
+                    action: #selector(selectCameraDevice(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = device
+                if device.uniqueID == activeID {
+                    item.state = .on
+                }
+                menu.addItem(item)
+            }
         }
 
-        let activeID = windowController?.activeCameraUniqueID
-        for device in devices {
-            let item = NSMenuItem(
-                title: device.localizedName,
-                action: #selector(selectCameraDevice(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = device
-            if device.uniqueID == activeID {
-                item.state = .on
-            }
-            menu.addItem(item)
-        }
+        menu.addItem(.separator())
+
+        let refresh = NSMenuItem(
+            title: "Refresh List",
+            action: #selector(refreshCameraList(_:)),
+            keyEquivalent: ""
+        )
+        refresh.target = self
+        menu.addItem(refresh)
+
+        menu.addItem(.separator())
+
+        let privacyTitle = Theme.Performance.faceRecognitionDisabled
+            ? "Privacy Mode: ON"
+            : "Privacy Mode: OFF"
+        let privacy = NSMenuItem(
+            title: privacyTitle,
+            action: #selector(togglePrivacyMode(_:)),
+            keyEquivalent: "p"
+        )
+        privacy.keyEquivalentModifierMask = [.command, .shift]
+        privacy.target = self
+        menu.addItem(privacy)
+        privacyMenuItem = privacy
     }
 
     @MainActor

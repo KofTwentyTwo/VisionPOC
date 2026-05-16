@@ -61,6 +61,11 @@ final class CurrentStateStore: @unchecked Sendable {
     private static let expressionNames: Set<String> = ["smile", "frown", "neutral_face"]
     private static let activityNames: Set<String> = ["standing", "sitting", "crouching", "hand_raised"]
 
+    /// Per-chirality finger entries time out after this many seconds without
+    /// a fresh `recordFingers` write. Without this, a hand that leaves the
+    /// frame leaves a stale "Left: 3 fingers" in the Status panel forever.
+    private static let fingerStaleSeconds: TimeInterval = 1.2
+
     /// Synchronously absorbs a single event. Called from the bus's
     /// arbitrary-thread emit path.
     private func absorb(_ event: DetectionEvent) {
@@ -71,14 +76,10 @@ final class CurrentStateStore: @unchecked Sendable {
                 _snapshot.expression = name
                 _snapshot.expressionAt = event.timestamp
             } else if name.hasPrefix("fingers_") {
-                // Pull the count out of the name; chirality not in the
-                // gesture event vocabulary, so default to "unknown" until
-                // we get a typed event.
-                let countStr = name.dropFirst("fingers_".count)
-                if let count = Int(countStr) {
-                    _snapshot.fingerCounts["unknown"] = count
-                    _snapshot.fingerUpdatedAt = event.timestamp
-                }
+                // FingerCounter is the authoritative writer for finger counts
+                // via `recordFingers(chirality:count:at:)`. The bus event is
+                // just a notification — don't shadow-write an "unknown" entry
+                // here, that's how the duplicate-row bug crept in.
             } else {
                 _snapshot.recentGestures.insert((name, event.timestamp), at: 0)
                 if _snapshot.recentGestures.count > 6 {
@@ -100,13 +101,49 @@ final class CurrentStateStore: @unchecked Sendable {
         }
     }
 
-    /// Called by the FingerCounter (or a future per-hand publisher) to
-    /// register a known chirality alongside the count.
+    /// Called by the FingerCounter (the sole authoritative writer for finger
+    /// counts) on each detection cycle.
     func recordFingers(chirality: String, count: Int, at time: Date) {
         os_unfair_lock_lock(&lock)
         _snapshot.fingerCounts[chirality] = count
         _snapshot.fingerUpdatedAt = time
         _version &+= 1
+        os_unfair_lock_unlock(&lock)
+    }
+
+    /// Called by the FingerCounter at the END of each detection cycle (after
+    /// it has finished publishing every hand it saw this frame). Anything
+    /// that wasn't refreshed within the staleness window gets pruned so the
+    /// Status panel reflects only currently-visible hands.
+    func ageFingerEntries(currentSeen: Set<String>, at time: Date) {
+        os_unfair_lock_lock(&lock)
+        var changed = false
+        for key in Array(_snapshot.fingerCounts.keys) where !currentSeen.contains(key) {
+            // Drop if it hasn't been touched recently. We can't store
+            // per-entry timestamps without bloating the struct, so use the
+            // single fingerUpdatedAt as a global staleness proxy: if a
+            // chirality wasn't seen this cycle AND we haven't seen any hand
+            // for staleSeconds, drop it.
+            if let last = _snapshot.fingerUpdatedAt,
+               time.timeIntervalSince(last) > CurrentStateStore.fingerStaleSeconds {
+                _snapshot.fingerCounts.removeValue(forKey: key)
+                changed = true
+            }
+        }
+        if changed {
+            _version &+= 1
+        }
+        os_unfair_lock_unlock(&lock)
+    }
+
+    /// Clears every per-chirality finger entry. Used when there are zero hand
+    /// observations this cycle.
+    func clearFingers() {
+        os_unfair_lock_lock(&lock)
+        if !_snapshot.fingerCounts.isEmpty {
+            _snapshot.fingerCounts.removeAll()
+            _version &+= 1
+        }
         os_unfair_lock_unlock(&lock)
     }
 }
