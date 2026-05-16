@@ -95,10 +95,15 @@ enum Theme {
         /// Minimum normalized area for a box to be drawn (filters out tiny noise regions).
         static let minBoxArea: CGFloat = 0.001
 
-        /// Bundled object detector model. The .mlmodel file must live under
-        /// `Sources/Resources/Models/<name>.mlmodel` so Xcode compiles it into
-        /// the app bundle as `<name>.mlmodelc`.
-        static let detectorModelName: String = "YOLOv3"
+        /// Bundled object detector model. The .mlmodel / .mlpackage file must
+        /// live under `Sources/Resources/Models/<name>.{mlmodel|mlpackage}` so
+        /// Xcode compiles it into the app bundle as `<name>.mlmodelc`.
+        ///
+        /// Default: yolov8x-oiv7 — Ultralytics' YOLOv8x trained on Open Images
+        /// V7, 601 classes including coffee cup, mug, wine glass, laptop,
+        /// computer monitor, mobile phone, human face / hand / eye / body, and
+        /// a broad household / vehicle / animal vocabulary.
+        static let detectorModelName: String = "yolov8x-oiv7"
 
         // MARK: - Live tunables
         //

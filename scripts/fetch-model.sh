@@ -1,35 +1,57 @@
 #!/usr/bin/env bash
-# Fetches the bundled object-detection model from Apple's Core ML model catalog.
-# The model is too large to commit to git (~248 MB), so we pull it on demand.
+# Fallback for environments without Git LFS. Re-runs the YOLO conversion
+# from Ultralytics' published Open Images V7 weights — produces a Core ML
+# mlpackage with 601 object classes in Sources/Resources/Models/.
 #
-# Run once after cloning, before the first `xcodegen generate && xcodebuild`:
+# Run once after cloning, if `git lfs pull` is unavailable or didn't fetch
+# the model:
 #   ./scripts/fetch-model.sh
+#
+# Requirements:
+#   - python3.12 or python3.13 (3.14 isn't supported by coremltools yet)
+#   - ~3 GB free disk for the venv (PyTorch + ultralytics + coremltools)
+#   - ~250 MB network for the pretrained weights
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODELS_DIR="$ROOT/Sources/Resources/Models"
-MODEL_NAME="YOLOv3"
-MODEL_URL="https://docs-assets.developer.apple.com/coreml/models/Image/ObjectDetection/YOLOv3/YOLOv3.mlmodel"
-DEST="$MODELS_DIR/$MODEL_NAME.mlmodel"
+MODEL_NAME="yolov8x-oiv7"
+DEST="$MODELS_DIR/$MODEL_NAME.mlpackage"
+VENV="${VPOC_VENV:-/tmp/visionpoc-venv}"
 
 mkdir -p "$MODELS_DIR"
 
-if [[ -f "$DEST" ]]; then
-  size=$(stat -f%z "$DEST")
-  if [[ "$size" -gt 100000000 ]]; then
-    echo "$MODEL_NAME.mlmodel already present (${size} bytes). Skipping download."
+if [[ -d "$DEST" ]] && [[ -f "$DEST/Data/com.apple.CoreML/weights/weight.bin" ]]; then
+  size=$(stat -f%z "$DEST/Data/com.apple.CoreML/weights/weight.bin")
+  if [[ "$size" -gt 10000000 ]]; then
+    echo "$MODEL_NAME.mlpackage already present and looks valid. Skipping rebuild."
     exit 0
   fi
-  echo "Existing $MODEL_NAME.mlmodel looks truncated (${size} bytes); re-downloading."
 fi
 
-echo "Downloading $MODEL_NAME from Apple's Core ML catalog…"
-curl -fL --progress-bar -o "$DEST" "$MODEL_URL"
+PY_BIN=""
+for cand in python3.13 python3.12; do
+  if command -v "$cand" >/dev/null 2>&1; then
+    PY_BIN="$cand"
+    break
+  fi
+done
 
-actual=$(stat -f%z "$DEST")
-echo "Saved $DEST (${actual} bytes)."
-
-if [[ "$actual" -lt 100000000 ]]; then
-  echo "Download appears incomplete. Expected ~248 MB; got ${actual} bytes." >&2
+if [[ -z "$PY_BIN" ]]; then
+  echo "Need python3.12 or python3.13. Install via: brew install python@3.13" >&2
   exit 1
 fi
+
+if [[ ! -d "$VENV" ]]; then
+  echo "Creating Python venv at $VENV…"
+  "$PY_BIN" -m venv "$VENV"
+fi
+
+echo "Installing coremltools + ultralytics into $VENV (this takes a couple of minutes)…"
+"$VENV/bin/pip" install --quiet --upgrade pip
+"$VENV/bin/pip" install --quiet coremltools ultralytics
+
+echo "Running conversion…"
+"$VENV/bin/python" "$ROOT/scripts/convert-yolo-oiv7.py"
+
+echo "Done. Set Theme.Performance.detectorModelName to \"$MODEL_NAME\" (default)."

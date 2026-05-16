@@ -7,6 +7,9 @@ Sibling to [MetalPOC](https://github.com/KofTwentyTwo/MetalPOC) (Jarvis HUD rend
 ## Highlights
 
 - **Zero-copy capture** — `AVCaptureSession` → `CVPixelBuffer` → `MTLTexture` via `CVMetalTextureCache` (no CPU roundtrip)
+- **601-class object detection** — YOLOv8x trained on Open Images V7, exported to a Vision-friendly Core ML pipeline. Recognizes everyday vocabulary like coffee cup, mug, wine glass, mobile phone, laptop, computer monitor, sunglasses, plus body parts (human face / hand / eye) and a broad household / vehicle / animal vocabulary
+- **Object tracking** — `VNTrackObjectRequest` updates each track's box on every frame between YOLO refreshes, so detections drift smoothly with motion instead of teleporting
+- **Face recognition** — enroll a face via the menu bar (⌘E), it shows up labeled by name in the JARVIS pane on subsequent frames. Powered by Vision's image FeaturePrint on padded face crops; templates persist to `~/Library/Application Support/VisionPOC/`
 - **Apple Neural Engine** — Vision requests configured with `MLComputeUnits.all`; runs on the ANE wherever possible
 - **Single render pass, four viewports** — one `MTKView`, one render pass, four fragment pipelines, one HUD overlay
 - **MPS Sobel** for edge detection — GPU-native, sub-millisecond at 1080p
@@ -23,18 +26,18 @@ Sibling to [MetalPOC](https://github.com/KofTwentyTwo/MetalPOC) (Jarvis HUD rend
 
 ## Build & Run
 
-Prerequisite: [Git LFS](https://git-lfs.com) is required because the bundled YOLOv3 model (~248 MB) is tracked via LFS. Install once on your machine: `brew install git-lfs && git lfs install`.
+Prerequisite: [Git LFS](https://git-lfs.com) is required because the bundled YOLOv8x model (~131 MB, Open Images V7, 601 classes) is tracked via LFS. Install once on your machine: `brew install git-lfs && git lfs install`.
 
 ```bash
 git clone https://github.com/KofTwentyTwo/VisionPOC.git
 cd VisionPOC
-git lfs pull                                  # ensure the YOLOv3 model is materialized
+git lfs pull                                  # materialize the bundled model
 xcodegen generate
 xcodebuild -project VisionPOC.xcodeproj -scheme VisionPOC -configuration Debug build
 open build/Debug/VisionPOC.app
 ```
 
-If you cloned without LFS installed, run `git lfs install && git lfs pull` and the model will be fetched into `Sources/Resources/Models/`. A fallback script (`scripts/fetch-model.sh`) is also provided for environments where LFS isn't available — it pulls the same model directly from Apple's Core ML catalog.
+If LFS isn't installed, `scripts/fetch-model.sh` regenerates the model from Ultralytics' weights via `coremltools` (requires python 3.12 or 3.13 and a few minutes — installs into a `/tmp` venv).
 
 On first launch, macOS will prompt for camera access. Grant it and the four-pane grid will activate.
 
