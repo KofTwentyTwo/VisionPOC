@@ -12,6 +12,12 @@ struct BoxUniforms {
     float4 params;  // x = mode (0=hollow stroke, 1=solid fill), y/z/w reserved
 };
 
+struct LineUniforms {
+    float4 endpoints;  // xy = start in NDC, zw = end in NDC
+    float4 color;
+    float4 params;     // x = thickness in NDC units; y = soft-edge falloff width (0 = sharp); z = dot mode (0=line, 1=dot); w reserved
+};
+
 // -----------------------------------------------------------------------------
 // Box vertex shader.
 //
@@ -82,4 +88,87 @@ fragment float4 box_fragment(QuadVaryings in [[stage_in]],
         discard_fragment();
     }
     return u.color;
+}
+
+// -----------------------------------------------------------------------------
+// Line vertex shader.
+//
+// Emits a 6-vertex triangle pair representing a rotated rectangle of the
+// requested thickness, oriented along the direction (end - start). UV.x is
+// the normalized 0..1 distance along the line; UV.y is the signed
+// perpendicular offset, scaled so |uv.y| < 1.0 stays inside the line. The
+// fragment uses uv.y for soft-edge antialiasing.
+//
+// In dot mode (params.z > 0.5), the start endpoint is rendered as a circular
+// dot of radius = thickness, ignoring `end`. Useful for joint markers.
+// -----------------------------------------------------------------------------
+vertex QuadVaryings line_vertex(uint vid [[vertex_id]],
+                                constant LineUniforms& u [[buffer(0)]]) {
+    float2 start = u.endpoints.xy;
+    float2 end   = u.endpoints.zw;
+    float thick  = max(u.params.x, 0.0005);
+
+    if (u.params.z > 0.5) {
+        // Dot mode: emit a `2*thick`-wide square around `start`.
+        float2 unit[6] = {
+            float2(-1, -1), float2( 1, -1), float2(-1,  1),
+            float2( 1, -1), float2( 1,  1), float2(-1,  1)
+        };
+        float2 corner = unit[vid];
+        float2 ndc = start + corner * thick;
+        QuadVaryings out;
+        out.position = float4(ndc, 0.0, 1.0);
+        out.uv = corner;  // unit-circle test space in [-1,1]^2
+        return out;
+    }
+
+    float2 dir = end - start;
+    float lengthDir = max(length(dir), 1e-5);
+    float2 forward = dir / lengthDir;
+    float2 perp = float2(-forward.y, forward.x) * thick;
+
+    // Order: bottom-left, bottom-right, top-left | bottom-right, top-right, top-left
+    // along the line direction: start side is "bottom", end side is "top".
+    float2 sBL = start - perp;
+    float2 sTR = start + perp;
+    float2 eBL = end   - perp;
+    float2 eTR = end   + perp;
+
+    float2 positions[6] = { sBL, eBL, sTR, eBL, eTR, sTR };
+    float2 uvs[6] = {
+        float2(0, -1), float2(1, -1), float2(0,  1),
+        float2(1, -1), float2(1,  1), float2(0,  1)
+    };
+
+    QuadVaryings out;
+    out.position = float4(positions[vid], 0.0, 1.0);
+    out.uv = uvs[vid];
+    return out;
+}
+
+// -----------------------------------------------------------------------------
+// Line fragment shader.
+//
+// In line mode: uv.y is signed perpendicular offset (-1..1 spans the line's
+// full thickness). A smoothstep on |uv.y| produces a feathered edge so the
+// line reads as a soft stroke rather than a hard rectangle.
+//
+// In dot mode: uv is the unit-circle space; fragments outside the unit
+// circle are discarded, producing a filled disk.
+// -----------------------------------------------------------------------------
+fragment float4 line_fragment(QuadVaryings in [[stage_in]],
+                              constant LineUniforms& u [[buffer(0)]]) {
+    if (u.params.z > 0.5) {
+        float r = length(in.uv);
+        if (r > 1.0) {
+            discard_fragment();
+        }
+        // Soft edge on the disk for a sub-pixel-clean look.
+        float alpha = smoothstep(1.0, 0.85, r);
+        return float4(u.color.rgb, u.color.a * alpha);
+    }
+
+    float falloff = max(u.params.y, 0.05);
+    float a = smoothstep(1.0, 1.0 - falloff, abs(in.uv.y));
+    return float4(u.color.rgb, u.color.a * a);
 }

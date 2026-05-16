@@ -1,14 +1,17 @@
 import SwiftUI
 
-/// SwiftUI viewer for the Detection History ring buffer. Polls at 1 Hz
-/// because the history is meant to be read, not watched in real-time —
-/// keeping render cost down lets the main window stay smooth.
+/// SwiftUI viewer for the Detection History ring buffer. Mirrors the Log
+/// Stream viewer's behavior and controls so both windows feel identical:
+/// oldest-to-newest order with auto-scroll-to-bottom on append, plus
+/// Pause and Auto-scroll toggles, a Category filter, and a Clear button.
 struct HistoryView: View {
     @State private var entries: [HistoryEntry] = []
     @State private var lastVersion: UInt64 = 0
     @State private var categoryFilter: Set<String> = Set(HistoryView.allCategories)
+    @State private var autoScroll: Bool = true
+    @State private var paused: Bool = false
 
-    private let pollTimer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
+    private let pollTimer = Timer.publish(every: 0.10, on: .main, in: .common).autoconnect()
 
     static let allCategories: [String] = [
         "object", "face-known", "face-unknown", "ocr",
@@ -17,7 +20,7 @@ struct HistoryView: View {
 
     private static let timeFormatter: DateFormatter = {
         let df = DateFormatter()
-        df.dateFormat = "HH:mm:ss"
+        df.dateFormat = "HH:mm:ss.SSS"
         return df
     }()
 
@@ -27,17 +30,15 @@ struct HistoryView: View {
             Divider()
             list
         }
-        .frame(minWidth: 520, idealWidth: 720, minHeight: 360, idealHeight: 520)
+        .frame(minWidth: 640, idealWidth: 820, minHeight: 360, idealHeight: 540)
         .background(Color(white: 0.07))
-        .onAppear { refresh(force: true) }
-        .onReceive(pollTimer) { _ in refresh(force: false) }
-    }
-
-    private func refresh(force: Bool) {
-        let v = HistoryStore.shared.version
-        if !force && v == lastVersion { return }
-        entries = HistoryStore.shared.snapshot()
-        lastVersion = v
+        .onReceive(pollTimer) { _ in
+            guard !paused else { return }
+            let v = HistoryStore.shared.version
+            guard v != lastVersion else { return }
+            entries = HistoryStore.shared.snapshot()
+            lastVersion = v
+        }
     }
 
     @ViewBuilder
@@ -56,15 +57,24 @@ struct HistoryView: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
 
+            Toggle("Auto-scroll", isOn: $autoScroll)
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
+
+            Toggle("Pause", isOn: $paused)
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
+
             Spacer()
 
-            Text("\(filtered.count) / \(entries.count)")
+            Text("\(filteredEntries.count) / \(entries.count)")
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
 
             Button("Clear") {
                 HistoryStore.shared.clear()
-                refresh(force: true)
+                entries = []
+                lastVersion = HistoryStore.shared.version
             }
             .controlSize(.small)
         }
@@ -73,30 +83,40 @@ struct HistoryView: View {
         .background(Color(white: 0.10))
     }
 
-    private var filtered: [HistoryEntry] {
-        // Newest-first feels right for a history reader — scan recent first.
-        entries.reversed().filter { categoryFilter.contains($0.category) }
+    /// Oldest-first, matching the Log Stream. Newest entries arrive at the
+    /// bottom and the ScrollViewReader pins the viewport there when
+    /// auto-scroll is on.
+    private var filteredEntries: [HistoryEntry] {
+        entries.filter { categoryFilter.contains($0.category) }
     }
 
     @ViewBuilder
     private var list: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(filtered) { entry in
-                    HStack(alignment: .top, spacing: 8) {
-                        Text(Self.timeFormatter.string(from: entry.timestamp))
-                            .foregroundStyle(.secondary)
-                        Text(entry.category)
-                            .foregroundStyle(color(for: entry.category))
-                            .frame(width: 90, alignment: .leading)
-                        Text(entry.summary)
-                            .foregroundStyle(.primary)
-                        Spacer(minLength: 0)
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(filteredEntries) { entry in
+                        HStack(alignment: .top, spacing: 8) {
+                            Text(Self.timeFormatter.string(from: entry.timestamp))
+                                .foregroundStyle(.secondary)
+                            Text(entry.category)
+                                .foregroundStyle(color(for: entry.category))
+                                .frame(width: 90, alignment: .leading)
+                            Text(entry.summary)
+                                .foregroundStyle(.primary)
+                            Spacer(minLength: 0)
+                        }
+                        .font(.system(.caption, design: .monospaced))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 2)
+                        .id(entry.id)
                     }
-                    .font(.system(.caption, design: .monospaced))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 2)
-                    .id(entry.id)
+                }
+            }
+            .onChange(of: filteredEntries.last?.id) { _, newValue in
+                guard autoScroll, let last = newValue else { return }
+                withAnimation(.linear(duration: 0.06)) {
+                    proxy.scrollTo(last, anchor: .bottom)
                 }
             }
         }

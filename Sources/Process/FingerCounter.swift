@@ -30,6 +30,20 @@ final class FingerCounter: @unchecked Sendable {
     func analyze(_ hands: [VNHumanHandPoseObservation]) {
         for hand in hands {
             guard let summary = countExtended(hand: hand) else { continue }
+            let chirality: String
+            switch hand.chirality {
+            case .left:    chirality = "left"
+            case .right:   chirality = "right"
+            case .unknown: chirality = "unknown"
+            @unknown default: chirality = "unknown"
+            }
+            // Record into the live state store so the Status panel can show
+            // "left: 3, right: 5" without subscribing to the bus itself.
+            CurrentStateStore.shared.recordFingers(
+                chirality: chirality,
+                count: summary.count,
+                at: Date()
+            )
             emitIfFresh(count: summary.count, confidence: summary.confidence)
         }
     }

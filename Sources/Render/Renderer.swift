@@ -61,6 +61,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var frameCounter: Int = 0
     private var smoothedFPS: Double = 60
 
+    /// MainActor-readable view of the smoothed FPS. The renderer's
+    /// `draw(in:)` already runs on MainActor (MTKViewDelegate contract), so
+    /// reading this from MainActor is race-free.
+    var smoothedFPSForReadout: Double { smoothedFPS }
+
     private var paneLabelTextures: [MTLTexture?] = [nil, nil, nil, nil]
     private var footerTexture: MTLTexture?
     private var statusTexture: MTLTexture?
@@ -754,13 +759,28 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     // MARK: - Pose overlay
 
+    /// Mirrors the MSL `LineUniforms` struct.
+    private struct LineUniforms {
+        var endpoints: SIMD4<Float>   // xy = start NDC, zw = end NDC
+        var color: SIMD4<Float>
+        var params: SIMD4<Float>      // x = thickness in NDC, y = soft-edge falloff, z = dot mode flag, w reserved
+    }
+
     private func drawPoses(
         encoder: MTLRenderCommandEncoder,
         poses: [PoseDetection],
         paneRect: CGRect
     ) {
         guard !poses.isEmpty else { return }
-        encoder.setRenderPipelineState(pipelines.boxes)
+        encoder.setRenderPipelineState(pipelines.lines)
+
+        // Compute thickness in NDC. We want a visually consistent stroke,
+        // ~3.5 px on screen. Convert px → NDC using the *smaller* pane
+        // dimension so circles stay round.
+        let thicknessPx: CGFloat = 3.5 * backingScale
+        let dotPx: CGFloat = 5.0 * backingScale
+        let lineThickNDC = Float(thicknessPx / max(min(paneRect.width, paneRect.height), 1)) * 2
+        let dotThickNDC  = Float(dotPx       / max(min(paneRect.width, paneRect.height), 1)) * 2
 
         for pose in poses {
             let color: SIMD4<Float>
@@ -769,51 +789,35 @@ final class Renderer: NSObject, MTKViewDelegate {
             case .hand: color = Theme.Palette.handPose
             }
 
-            // Segments — Option A: draw each as the axis-aligned bounding rect
-            // of its endpoints. Blocky for diagonals but a single draw call per
-            // segment and matches the existing shader contract exactly. A v2
-            // could subdivide into mini-rects for smoother diagonals.
+            // ---- Skeleton segments ----
+            // Use the rotated-quad line shader so diagonals look like actual
+            // strokes instead of axis-aligned bounding boxes.
             for seg in pose.segments {
-                let minX = Float(min(seg.start.x, seg.end.x))
-                let maxX = Float(max(seg.start.x, seg.end.x))
-                let minY = Float(min(seg.start.y, seg.end.y))
-                let maxY = Float(max(seg.start.y, seg.end.y))
-                // Give zero-extent (perfectly horizontal/vertical) segments a
-                // visible thickness — without this they'd render as a 0-pixel
-                // strip and vanish.
-                let thicknessNorm: Float = 0.003
-                let w = max(maxX - minX, thicknessNorm)
-                let h = max(maxY - minY, thicknessNorm)
-                let originNDC = SIMD2<Float>(minX * 2 - 1, minY * 2 - 1)
-                let sizeNDC = SIMD2<Float>(w * 2, h * 2)
-                var uniforms = BoxUniforms(
-                    rect: SIMD4<Float>(originNDC.x, originNDC.y, sizeNDC.x, sizeNDC.y),
+                let sxNDC = Float(seg.start.x) * 2 - 1
+                let syNDC = Float(seg.start.y) * 2 - 1
+                let exNDC = Float(seg.end.x) * 2 - 1
+                let eyNDC = Float(seg.end.y) * 2 - 1
+                var uniforms = LineUniforms(
+                    endpoints: SIMD4<Float>(sxNDC, syNDC, exNDC, eyNDC),
                     color: color,
-                    params: SIMD4<Float>(1, 0, 0, 0)   // solid fill
+                    params: SIMD4<Float>(lineThickNDC, 0.35, 0, 0)
                 )
-                encoder.setVertexBytes(&uniforms, length: MemoryLayout<BoxUniforms>.stride, index: 0)
-                encoder.setFragmentBytes(&uniforms, length: MemoryLayout<BoxUniforms>.stride, index: 0)
+                encoder.setVertexBytes(&uniforms, length: MemoryLayout<LineUniforms>.stride, index: 0)
+                encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LineUniforms>.stride, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
             }
 
-            // Joint dots — 3 px squares. Convert 3 px to normalized image
-            // coords using the pane size so the dots stay roughly the same
-            // visual size regardless of pane.
-            let dotPx: CGFloat = 3 * backingScale
-            let dotNormX = Float(dotPx / max(paneRect.width, 1))
-            let dotNormY = Float(dotPx / max(paneRect.height, 1))
+            // ---- Joint dots (filled circles via the dot-mode line shader) ----
             for p in pose.points {
-                let px = Float(p.x) - dotNormX * 0.5
-                let py = Float(p.y) - dotNormY * 0.5
-                let originNDC = SIMD2<Float>(px * 2 - 1, py * 2 - 1)
-                let sizeNDC = SIMD2<Float>(dotNormX * 2, dotNormY * 2)
-                var uniforms = BoxUniforms(
-                    rect: SIMD4<Float>(originNDC.x, originNDC.y, sizeNDC.x, sizeNDC.y),
+                let pxNDC = Float(p.x) * 2 - 1
+                let pyNDC = Float(p.y) * 2 - 1
+                var uniforms = LineUniforms(
+                    endpoints: SIMD4<Float>(pxNDC, pyNDC, pxNDC, pyNDC),
                     color: color,
-                    params: SIMD4<Float>(1, 0, 0, 0)
+                    params: SIMD4<Float>(dotThickNDC, 0.0, 1.0, 0)  // dot mode
                 )
-                encoder.setVertexBytes(&uniforms, length: MemoryLayout<BoxUniforms>.stride, index: 0)
-                encoder.setFragmentBytes(&uniforms, length: MemoryLayout<BoxUniforms>.stride, index: 0)
+                encoder.setVertexBytes(&uniforms, length: MemoryLayout<LineUniforms>.stride, index: 0)
+                encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LineUniforms>.stride, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
             }
         }

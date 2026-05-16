@@ -8,6 +8,7 @@ final class Pipelines {
     let boxes: MTLRenderPipelineState
     let hudText: MTLRenderPipelineState
     let ascii: MTLRenderPipelineState
+    let lines: MTLRenderPipelineState
 
     init(device: MTLDevice, library: MTLLibrary) throws {
         self.device = device
@@ -46,6 +47,12 @@ final class Pipelines {
             device: device, library: library,
             vertex: "quad_vertex", fragment: "ascii_fragment",
             label: "AsciiPipeline"
+        )
+
+        self.lines = try Pipelines.makeBlendedPipeline(
+            device: device, library: library,
+            vertex: "line_vertex", fragment: "line_fragment",
+            label: "LinesPipeline"
         )
     }
 

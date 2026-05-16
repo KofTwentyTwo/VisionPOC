@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import CoreText
 import Metal
+import SwiftUI
 import Vision
 
 @main
@@ -10,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     @MainActor private var settingsController: SettingsWindowController?
     @MainActor private var logController: LogStreamWindowController?
     @MainActor private var historyController: HistoryWindowController?
+    @MainActor private var statusController: StatusWindowController?
     @MainActor private var cameraDevicesSubmenu: NSMenu?
     @MainActor private var recorder: Recorder?
     @MainActor private var privacyMenuItem: NSMenuItem?
@@ -71,6 +73,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         logStream.keyEquivalentModifierMask = [.command]
         logStream.target = self
         appMenu.addItem(logStream)
+
+        let statusPanel = NSMenuItem(
+            title: "Status…",
+            action: #selector(openStatus(_:)),
+            keyEquivalent: "i"
+        )
+        statusPanel.keyEquivalentModifierMask = [.command]
+        statusPanel.target = self
+        appMenu.addItem(statusPanel)
 
         appMenu.addItem(.separator())
 
@@ -304,6 +315,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         historyController?.showWindow(nil)
         historyController?.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @MainActor
+    @objc private func openStatus(_ sender: Any?) {
+        if statusController == nil {
+            statusController = StatusWindowController(detectorAccess: { [weak self] in
+                self?.buildDetectorSnapshot()
+            })
+        }
+        statusController?.showWindow(nil)
+        statusController?.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @MainActor
+    private func buildDetectorSnapshot() -> DetectorSnapshot? {
+        guard let wc = windowController else { return nil }
+        let det = wc.detector
+        let detections = det.currentDetections()
+
+        // Partition into face vs. object entries. A detection's label is a
+        // recognized name when it's an enrolled face — those labels are
+        // uppercased and don't appear in the COCO/OIV7 class set. Treat
+        // anything explicitly named "FACE" or matching an enrolled name as
+        // a face entry; everything else is an object.
+        let enrolledUpper = Set(det.faceRegistry.enrolledNames().map { $0.uppercased() })
+        var faces: [DetectorSnapshot.FaceEntry] = []
+        var objects: [DetectorSnapshot.ObjectEntry] = []
+        for d in detections {
+            if d.label == "FACE" || enrolledUpper.contains(d.label) {
+                faces.append(.init(name: d.label.lowercased(), distance: nil))
+            } else {
+                let rgba = ColorHash.colorFor(trackId: d.trackId)
+                objects.append(.init(
+                    label: d.label,
+                    confidence: d.confidence,
+                    color: Color(red: Double(rgba.x),
+                                 green: Double(rgba.y),
+                                 blue: Double(rgba.z))
+                ))
+            }
+        }
+        // Sort objects by confidence descending so the most-confident detections lead.
+        objects.sort { $0.confidence > $1.confidence }
+
+        return DetectorSnapshot(
+            fps: wc.renderer.smoothedFPSForReadout,
+            lastInferenceMs: det.lastInferenceMs,
+            detectMode: det.lastDetectMode.rawValue,
+            objects: objects,
+            faces: faces
+        )
     }
 
     // MARK: - Privacy Mode
