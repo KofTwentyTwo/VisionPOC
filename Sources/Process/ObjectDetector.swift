@@ -87,6 +87,8 @@ final class ObjectDetector: @unchecked Sendable {
     private let gestureRecognizer = GestureRecognizer()
     private let activityRecognizer = ActivityRecognizer()
     private let spatialReasoner = SpatialReasoner()
+    private let fingerCounter = FingerCounter()
+    private let facialExpressionAnalyzer = FacialExpressionAnalyzer()
     private let eventBus = DetectionEventBus.shared
 
     /// Per-text last-seen-at, used to suppress flooding the bus with the
@@ -335,7 +337,11 @@ final class ObjectDetector: @unchecked Sendable {
     private func detectAndBootstrap(pixelBuffer: CVPixelBuffer, now: CFAbsoluteTime) -> (text: [TextDetection], poses: [PoseDetection], timing: DetectorStageTiming) {
         var timing = DetectorStageTiming()
 
-        let faces = VNDetectFaceRectanglesRequest()
+        // Use the landmarks request instead of the plain rectangles request —
+        // it's a superset (still gives us the bounding box for tracking + face
+        // recognition) and also populates `landmarks.outerLips` so the
+        // FacialExpressionAnalyzer can read mouth shape for smile/frown.
+        let faces = VNDetectFaceLandmarksRequest()
         let animals = VNRecognizeAnimalsRequest()
 
         let text = VNRecognizeTextRequest()
@@ -426,6 +432,17 @@ final class ObjectDetector: @unchecked Sendable {
             // detection cycle" — same semantics as the spec.
             eventBus.emit(.faceSeenUnknown(trackId: nil))
         }
+        // Named-joint analyzers read raw Vision observations directly because
+        // PoseDetection.points are intentionally unnamed for the renderer
+        // path. FingerCounter reads thumbTip/indexMCP/etc., FacialExpression
+        // reads landmarks.outerLips.
+        if let handObs = handPose.results {
+            fingerCounter.analyze(handObs)
+        }
+        if let faceObs = faces.results {
+            facialExpressionAnalyzer.analyze(faceObs)
+        }
+
         if let animalResults = animals.results {
             for obs in animalResults {
                 let label = (obs.labels.first?.identifier ?? "ANIMAL").uppercased()
