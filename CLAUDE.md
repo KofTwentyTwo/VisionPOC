@@ -20,43 +20,79 @@ Or open `VisionPOC.xcodeproj` in Xcode 26+ and run.
 
 ```
 Sources/
-  App/          NSApp lifecycle, windows, ⌘L log viewer, ⌘, settings, ⌘H history
-    AppDelegate.swift             entry point, menu wiring
+  App/          NSApp lifecycle, all secondary windows, menus, user state
+    AppDelegate.swift             entry point, menu wiring (5 menus)
     MainWindowController.swift    main camera-view window
-    LogStream.swift               in-memory ring buffer (1000 entries) + stdout mirror
-    LogStreamView.swift           SwiftUI viewer for LogStream
+    LogStream.swift               ring buffer (1000 entries) + stdout mirror
+    LogStreamView.swift           SwiftUI viewer
     LogStreamWindowController.swift
-    SettingsView.swift            live tuning UI bound to TunableSettings
+    SettingsView.swift            live tuning UI + diagnostics + output paths
     SettingsWindowController.swift
-  Capture/      AVFoundation → CVPixelBuffer
-    CameraCapture.swift           camera enumeration + delegate-based frame stream
+    StatusView.swift              "what we know right now" panel
+    StatusWindowController.swift
+    HistoryEntry.swift            DetectionEvent → human-readable row
+    HistoryStore.swift            500-entry semantic event ring
+    HistoryView.swift             SwiftUI viewer (same controls as LogStream)
+    HistoryWindowController.swift
+    AboutView.swift               credits + tech stack + license
+    AboutWindowController.swift
+    CurrentStateStore.swift       Latest expression / activity / per-hand finger counts / recent gestures — singleton subscribed to DetectionEventBus
+    OutputLocations.swift         Persistent snapshot/recording directories via security-scoped bookmarks
+  Capture/
+    CameraCapture.swift           AVCaptureSession + CVMetalTextureCache + device switching + disconnect handling
   Process/      pure-Swift detection/recognition layer
-    ObjectDetector.swift          YOLO + Vision rectangle/track requests; the orchestrator
-    FaceRegistry.swift            persisted feature-print store, distance match
-    TrackStore.swift              identity tracking across frames
-    DetectionEvents.swift         enum of cross-subsystem event kinds
-    DetectionEventBus.swift       Sendable pub/sub singleton
-    Greeter.swift                 TTS announcements for face/object appearances
-    GestureRecognizer.swift       Vision hand-pose → gesture labels
-    ActivityRecognizer.swift      time-windowed gesture/motion → activity labels
-    SpatialReasoner.swift         "X is to the left of Y" derivations from rects
-    AsciiPass.swift               renders frame as ASCII art (effect pane)
-    EdgePass.swift                Sobel/edge pass
-    JarvisStylePass.swift         Jarvis-themed HUD chrome
-    ProcessedFrame.swift          per-frame bundle of detections passed to Renderer
+    ObjectDetector.swift          YOLO + Vision + tracker orchestrator (the brain)
+    DetectionEvents.swift         enum DetectionEvent.Kind (vocabulary)
+    DetectionEventBus.swift       Sendable pub/sub singleton with Token-based unsubscribe
+    FaceRegistry.swift            on-disk per-name FeaturePrint store + matchThreshold
+    TrackStore.swift              label → UUID persistence across launches
+    Greeter.swift                 TTS subscriber on .faceRecognized (mutable + privacy-aware)
+    GestureRecognizer.swift       hand-pose → discrete gestures
+    ActivityRecognizer.swift      body-pose → discrete activities
+    FingerCounter.swift           Extended-finger count per hand chirality
+    FacialExpressionAnalyzer.swift outerLips landmarks → smile / frown / neutral
+    SpatialReasoner.swift         "near", "above", "inside", "holding"
+    AsciiPass.swift               Glyph atlas + uniforms for ASCII pane
+    EdgePass.swift                MPS Sobel + threshold compute kernel
+    JarvisStylePass.swift         Per-frame uniforms for jarvis_fragment
+    ProcessedFrame.swift          TextDetection / PoseDetection / DetectMode types
   Render/       Metal pipeline
-    Renderer.swift                main draw loop, pane layout, overlays
-    Pipelines.swift               Metal pipeline state objects (boxes/edges/ascii/etc.)
+    Renderer.swift                main draw loop, pane layout, all overlay helpers
+    Pipelines.swift               Metal pipeline state objects (live/jarvis/edges/ascii/boxes/text/lines)
     FrameContext.swift            per-frame transient state
-    ColorHash.swift               stable label → color mapping
-    Recorder.swift                Metal → mp4 capture
-  Shaders/      .metal sources for each pass
-  Text/         TextRasterizer — bitmap label rendering for Metal overlays
+    ColorHash.swift               stable trackId → hue
+    Recorder.swift                @MainActor AVAssetWriter pipeline for ⇧⌘R
+  Shaders/
+    Common.metal, Live.metal, Jarvis.metal, Edges.metal, Boxes.metal (incl. line/dot shader), Ascii.metal
+  Text/         TextRasterizer — CoreText → MTLTexture for HUD labels
   Resources/
-    Fonts/      Orbitron, ShareTechMono
-    Models/     yolov8x-oiv7.mlpackage (LFS)
-  Theme.swift   single source of truth for colors, sizes, rects, perf knobs
+    Fonts/      Orbitron, ShareTechMono (SIL OFL)
+    Models/     yolov8x-oiv7.mlpackage (Git LFS — ~131 MB)
+  Theme.swift   single source of truth: palette, layout, fonts, performance knobs
 ```
+
+## Windows & shortcuts
+
+Five secondary windows live alongside the main camera grid. Each has its own controller in `Sources/App/`, persists its window frame via `UserDefaults`, and is opened lazily.
+
+| Window | Key | Backing store(s) |
+|---|---|---|
+| Main 4-pane grid | (default) | live `ObjectDetector` + `Renderer` |
+| Settings | ⌘, | `TunableSettings` (mirrors `Theme.Performance.*` vars) |
+| Status Panel | ⌘I | `CurrentStateStore.shared` + live `ObjectDetector` + `HistoryStore` tail |
+| Detection History | ⇧⌘H | `HistoryStore.shared` (500-entry ring of `HistoryEntry`s) |
+| Log Stream | ⌘L | `LogStream.shared` (1000-entry ring of subsystem log lines) |
+| About | (menu) | static |
+
+| Action | Key |
+|---|---|
+| Enroll Face… | ⌘E |
+| Forget Face… | ⇧⌘E |
+| Save Snapshot | ⌘S |
+| Start / Stop Recording | ⇧⌘R |
+| Privacy Mode | ⇧⌘P |
+
+Note: ⌘H is intentionally NOT bound here — it's reserved for the standard macOS "Hide Application" shortcut. The History window uses ⇧⌘H.
 
 ## Theme tunables
 
@@ -91,9 +127,31 @@ When adding a new tunable, default the `var` to the same value the old `let` had
 
 **⌘,** opens the live tuning panel. Bound to `TunableSettings` / `Theme.Performance` and related static vars. Sliders push directly into the `nonisolated(unsafe)` vars in `Theme.swift`. No restart required.
 
+Settings also exposes:
+- **Output Locations** — picker buttons that open `NSOpenPanel`, store the chosen folder as a security-scoped bookmark via `OutputLocations`. ⌘S / ⇧⌘R write to these paths instead of `~/Desktop`.
+- **Diagnostics** — per-stage detector timing (Vision bundle / FeaturePrint / Tracker / Total) polled at 2 Hz from `ObjectDetector.lastStageTiming`.
+- **Mute greeter** — surfaces the same flag as Privacy Mode (and is set by it).
+
 ## History
 
-**⌘H** opens the event history window — a scrollback of recent `DetectionEvent`s with timestamps and metadata. Useful for verifying that an emission actually fired and for replaying recent activity.
+**⇧⌘H** opens the event history window. Same controls as the Log Stream (Category filter, Auto-scroll, Pause, count, Clear), oldest-on-top with auto-scroll-to-bottom. Backed by `HistoryStore.shared` which subscribes to `DetectionEventBus` once at first access.
+
+## Status panel
+
+**⌘I** opens the Status panel — the single most useful window for "is everything seeing what I think it should be seeing." Sections:
+
+- **header** — FPS + DET ms + mode (yolo / track) from the live `Renderer` + `ObjectDetector`
+- **OBJECTS (N)** — every active track, colored dot matches the JARVIS-pane box, sorted by confidence
+- **FACES (N)** — recognized names from `FaceRegistry`
+- **HANDS** — per-chirality finger counts written by `FingerCounter` into `CurrentStateStore`. Entries auto-expire ~1.2s after a hand leaves the frame.
+- **STATE** — last `expression` and `activity` from `CurrentStateStore`
+- **RECENT** — newest 8 entries from `HistoryStore`
+
+The panel polls four times per second; the underlying state stores use lock-protected snapshots.
+
+## Privacy mode (⇧⌘P)
+
+Toggle that flips both `Theme.Performance.greeterMuted` and `Theme.Performance.faceRecognitionDisabled`. The greeter suppresses TTS. The `HistoryStore` filters face entries out of the timeline. Detector behavior for face *recognition* labels in the bounding boxes is left to the detector's discretion — the flag is informational.
 
 ## Adding a new detector
 
@@ -118,6 +176,15 @@ When adding a new tunable, default the `var` to the same value the old `let` had
 
 ## Known issues
 
-- Inherited HTML-derived Orbitron font name; on missing TTF it falls back to Helvetica. Cosmetic only.
-- No app icon yet.
-- IPC story for Jarvis-program integration (sharing events with VoicePOC / a central agent) is still TBD.
+- The bundled `Orbitron-Bold.ttf` is inherited from MetalPOC and is actually an HTML 404 page from a misfired download. `Theme.Font.title(_:)` falls back to Helvetica Neue cleanly; pane labels just lose their custom typography. Drop a real TTF in `Sources/Resources/Fonts/` to fix.
+- No app icon yet (uses the default macOS application icon).
+- IPC story for Jarvis-program integration (sharing events with VoicePOC / a central agent) is still TBD. The in-process `DetectionEventBus` is the primitive a future IPC layer would publish over.
+
+## Conventions for agents working on this codebase
+
+- **Never hand-edit `VisionPOC.xcodeproj`.** Always edit `project.yml` and re-run `xcodegen generate`.
+- **Stay within scope.** When fanning out parallel agents, partition by file ownership (App / Process / Render / Tests) and lock cross-agent contracts BEFORE dispatch — `DetectionEvents.swift`, `ProcessedFrame.swift`, and protocol shapes are the typical contracts.
+- **Don't add new files without considering placement.** Subsystems group by directory (`Sources/Process/` for detector logic, `Sources/App/` for UI/windows, `Sources/Render/` for Metal). A new analyzer goes in Process; a new window goes in App.
+- **Trust the LogStream over print().** Use `LogStream.shared.log(_:level:source:)` so events show up in the live viewer AND on stdout.
+- **Match the live-tunable convention.** New tunables get `nonisolated(unsafe) static var` in `Theme.Performance`, a mirror property in `TunableSettings` with a `didSet` writeback, and a SwiftUI control in `SettingsView`.
+- **SourceKit warnings about "Cannot find type X in scope" are usually stale** — `xcodegen generate` re-syncs them after new files land. Trust `xcodebuild` over SourceKit's live diagnostics.
