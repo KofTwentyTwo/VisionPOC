@@ -143,58 +143,17 @@ The full original design spec lives at `docs/superpowers/specs/2026-05-15-vision
 
 ---
 
-## Project structure
+## Codebase Anatomy & Domain Encapsulation
 
-```
-Sources/
-├── App/                         AppKit + SwiftUI app shell, menus, windows
-│   ├── AppDelegate.swift        Menu bar, window controllers, lifecycle
-│   ├── MainWindowController.swift
-│   ├── Settings{View,WindowController}.swift
-│   ├── Status{View,WindowController}.swift
-│   ├── History{Entry,Store,View,WindowController}.swift
-│   ├── LogStream{,View,WindowController}.swift
-│   ├── About{View,WindowController}.swift
-│   ├── CurrentStateStore.swift  Live state for the Status panel
-│   ├── OutputLocations.swift    Persistent snapshot/recording dirs
-│   └── LogStream.swift          Thread-safe ring buffer of system events
-├── Capture/
-│   └── CameraCapture.swift      AVCaptureSession + CVMetalTextureCache + device switching
-├── Process/
-│   ├── ObjectDetector.swift     Orchestrates YOLO + Vision requests + tracker
-│   ├── DetectionEvents.swift    Event vocabulary
-│   ├── DetectionEventBus.swift  Pub/sub primitive
-│   ├── Greeter.swift            TTS subscriber
-│   ├── GestureRecognizer.swift  Hand-pose → discrete gestures
-│   ├── ActivityRecognizer.swift Body-pose → activities
-│   ├── FingerCounter.swift      Extended-finger count per hand + chirality
-│   ├── FacialExpressionAnalyzer.swift  Outer-lip → smile/frown/neutral
-│   ├── SpatialReasoner.swift    Inter-object relations
-│   ├── FaceRegistry.swift       Persistent enrolled-face FeaturePrints
-│   ├── TrackStore.swift         UUID persistence across launches
-│   ├── EdgePass.swift           MPS Sobel + threshold
-│   ├── JarvisStylePass.swift    Per-frame uniforms for jarvis_fragment
-│   ├── AsciiPass.swift          Glyph atlas + uniforms
-│   ├── ProcessedFrame.swift     Shared overlay types
-│   └── ObjectDetector.swift     (combined as the orchestrator)
-├── Render/
-│   ├── Renderer.swift           MTKViewDelegate + all draw helpers
-│   ├── Pipelines.swift          MTLRenderPipelineStates
-│   ├── Recorder.swift           AVAssetWriter pipeline for ⇧⌘R
-│   ├── ColorHash.swift          Stable per-track hue from UUID
-│   └── FrameContext.swift
-├── Shaders/                     .metal files: Common, Live, Jarvis, Edges, Boxes (+ lines), Ascii
-├── Text/                        CoreText → MTLTexture
-├── Resources/
-│   ├── Fonts/                   Share Tech Mono + Orbitron
-│   └── Models/                  yolov8x-oiv7.mlpackage (Git LFS)
-└── Theme.swift                  All compile-time + live tunable parameters
-
-Tests/                           XCTest target — IoU, AspectFit, LogStream, EventBus
-.github/workflows/build.yml      CI: xcodegen + xcodebuild + test
-docs/superpowers/specs/          Original design spec (kept for archeology)
-CLAUDE.md                        Agent / new-contributor onboarding doc
-```
+| Subsystem / Path | Architectural Role & Responsibilities |
+| :--- | :--- |
+| **`Sources/App/`** | AppKit & SwiftUI window management, menu bar lifecycle, status panel, event log stream, and output destination security bookmarks. |
+| **`Sources/Capture/`** | `AVCaptureSession` pipeline, hardware camera selection, and zero-copy `CVMetalTextureCache` frame buffering. |
+| **`Sources/Process/`** | `ObjectDetector` orchestrator (YOLOv8x + Vision framework), `DetectionEventBus` pub/sub engine, face registry, gesture/activity/expression analyzers, and spatial reasoning. |
+| **`Sources/Render/`** | `MTKViewDelegate` multi-viewport render loop, Metal pipeline states, custom line-drawing box shaders, and `AVAssetWriter` video recording. |
+| **`Sources/Shaders/`** | Metal Shading Language kernels (`.metal`) for luma quantization, edge detection, box rendering, and ASCII character rasterization. |
+| **`Sources/Text/`** | `TextRasterizer` CoreText to `MTLTexture` engine for chamfer-aware HUD typography. |
+| **`Sources/Theme.swift`** | Centralized design system constants, detector thresholds, tracker parameters, and render styling. |
 
 ---
 
@@ -210,7 +169,6 @@ CLAUDE.md                        Agent / new-contributor onboarding doc
   - [Share Tech Mono](https://fonts.google.com/specimen/Share+Tech+Mono) by Carrois Apostrophe
   - [Orbitron](https://fonts.google.com/specimen/Orbitron) by Matt McInerney
 - **Aesthetic**: Jarvis / Iron Man cinematic HUD
-- **Built with**: Claude Opus + [Claude Code](https://claude.com/claude-code) — Anthropic
 - **Sibling repos**: [MetalPOC](https://github.com/KofTwentyTwo/MetalPOC), [VoicePOC](https://github.com/KofTwentyTwo/VoicePOC)
 
 ## Tech stack
