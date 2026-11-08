@@ -98,9 +98,16 @@ xcodebuild -project VisionPOC.xcodeproj -scheme VisionPOC -configuration Debug -
 
 24 unit tests across IoU, aspect-fit, LogStream ring buffer, and DetectionEventBus pub/sub.
 
+The tests are app-hosted XCTests (`TEST_HOST` is the app). CI compiles them but does not run them (the CI
+macOS runner has no GUI session), so run the command above locally before merging.
+
 ### Continuous integration
 
-GitHub Actions builds + tests on every push to `main` — see `.github/workflows/build.yml`. LFS is skipped on CI (the build tolerates a missing model since `ObjectDetector` falls back to the Vision built-ins).
+Gitea Actions (`.gitea/workflows/build.yaml`, the shared `KofTwentyTwo/ci-workflows` macOS workflow on grogu)
+builds the app and the test bundle unsigned (`build-for-testing`) on every push. It is build only: the tests
+run locally (above). LFS is skipped on CI: the pointer-only model is removed before `xcodegen generate`, and
+`ObjectDetector` falls back to the Vision built-ins when the model is missing. The `.github` workflow still
+runs on the GitHub mirror.
 
 ---
 
