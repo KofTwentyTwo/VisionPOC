@@ -1,0 +1,14 @@
+name: build
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+jobs:
+  macos:
+    uses: self:KofTwentyTwo/ci-workflows/.gitea/workflows/macos.yaml@native-workflows
+    secrets: inherit
+    with:
+      commands: |
+        xcodegen generate
+        xcodebuild -quiet -project VisionPOC.xcodeproj -scheme VisionPOC -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
+        xcodebuild -quiet -project VisionPOC.xcodeproj -scheme VisionPOC -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO test
