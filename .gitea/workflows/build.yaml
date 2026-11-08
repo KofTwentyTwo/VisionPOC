@@ -5,7 +5,7 @@ on:
     tags: ['v*']
 jobs:
   macos:
-    uses: self:KofTwentyTwo/ci-workflows/.gitea/workflows/macos.yaml@native-workflows
+    uses: self:KofTwentyTwo/ci-workflows/.gitea/workflows/macos.yaml@v1
     secrets: inherit
     with:
       commands: |
