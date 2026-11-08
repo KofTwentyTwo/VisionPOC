@@ -12,3 +12,4 @@ jobs:
         xcodegen generate
         xcodebuild -quiet -project VisionPOC.xcodeproj -scheme VisionPOC -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
         xcodebuild -quiet -project VisionPOC.xcodeproj -scheme VisionPOC -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO test
+      lfs: true
